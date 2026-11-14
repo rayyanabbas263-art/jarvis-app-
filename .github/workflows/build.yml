@@ -17,7 +17,7 @@ jobs:
           gradle-version: '8.9'
       - name: Project banao
         run: |
-          mkdir -p app/src/main/java/com/rayyan/jarvis app/src/main/res/xml
+          mkdir -p app/src/main/java/com/rayyan/jarvis app/src/main/res/xml app/src/main/res/values
           cat > settings.gradle <<'JARVISEOF'
           pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
           dependencyResolutionManagement { repositories { google(); mavenCentral() } }
@@ -32,7 +32,7 @@ jobs:
           android {
               namespace 'com.rayyan.jarvis'
               compileSdk 34
-              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 6; versionName '1.5' }
+              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 7; versionName '1.6' }
               compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
           }
           tasks.withType(JavaCompile) { options.encoding = 'UTF-8' }
@@ -63,6 +63,10 @@ jobs:
                       <intent-filter><action android:name="android.service.voice.VoiceInteractionService"/></intent-filter>
                   </service>
                   <service android:name=".JarvisSessionService" android:permission="android.permission.BIND_VOICE_INTERACTION" android:exported="true"/>
+                  <service android:name=".JarvisAccess" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE" android:exported="true">
+                      <intent-filter><action android:name="android.accessibilityservice.AccessibilityService"/></intent-filter>
+                      <meta-data android:name="android.accessibilityservice" android:resource="@xml/accessibility_service"/>
+                  </service>
               </application>
           </manifest>
           JARVISEOF
@@ -363,7 +367,31 @@ jobs:
                           ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " LIKE ?", new String[]{"%" + name + "%"}, null)) {
                       if (c != null && c.moveToFirst()) return c.getString(0).replaceAll("[^0-9+]", "");
                   } catch (Exception e) { }
-                  toast("Contact nahi mila: " + name);
+                  String fz = fuzzyNum(name);
+              if (fz != null) return fz;
+              toast("Contact nahi mila: " + name);
+                  return null;
+              }
+
+              String vkey(String s) { return norm(s).replaceAll("[aeiouy]", ""); }
+
+              String fuzzyNum(String name) {
+                  String k = vkey(name);
+                  if (k.length() < 2) return null;
+                  try (Cursor c = getContentResolver().query(ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                          new String[]{ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER}, null, null, null)) {
+                      String best = null;
+                      int bs = 0;
+                      while (c != null && c.moveToNext()) {
+                          String dn = c.getString(0);
+                          String ck = vkey(dn == null ? "" : dn);
+                          int sc = 0;
+                          if (ck.equals(k)) sc = 100;
+                          else if (ck.length() >= 2 && (ck.contains(k) || k.contains(ck))) sc = 60;
+                          if (sc > bs) { bs = sc; best = c.getString(1); }
+                      }
+                      if (best != null) return best.replaceAll("[^0-9+]", "");
+                  } catch (Exception e) { }
                   return null;
               }
 
@@ -465,6 +493,41 @@ jobs:
                   return null;
               }
 
+              boolean isAccessOn() {
+                  try {
+                      String s = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+                      return s != null && s.contains("com.rayyan.jarvis");
+                  } catch (Exception e) { return false; }
+              }
+
+              void waOpen(String name, String text, String mode) {
+                  String n = num(name);
+                  if (n == null) return;
+                  n = n.replace("+", "");
+                  if (n.startsWith("0")) n = "92" + n.substring(1);
+                  String pk = waPkg();
+                  if (pk == null) { toast("WhatsApp install nahi mili"); return; }
+                  boolean on = isAccessOn();
+                  if (!on && mode.equals("call")) {
+                      toast("Pehle Accessibility mein Jarvis ko on karo");
+                      go(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+                      return;
+                  }
+                  if (on) {
+                      JarvisAccess.callTapped = false;
+                      JarvisAccess.pending = mode;
+                      JarvisAccess.until = System.currentTimeMillis() + 15000;
+                  } else {
+                      toast("Accessibility on nahi hai, Send khud dabana hoga");
+                  }
+                  try {
+                      String u = "https://wa.me/" + n;
+                      if (mode.equals("send")) u += "?text=" + URLEncoder.encode(text, "UTF-8");
+                      Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(u));
+                      i.setPackage(pk);
+                      go(i);
+                  } catch (Exception e) { toast("WhatsApp nahi khuli"); }
+              }
               class Br {
                           @JavascriptInterface public void listen() {
                               runOnUiThread(() -> {
@@ -544,6 +607,24 @@ jobs:
                       }
                   }
 
+                  @JavascriptInterface public void waSend(String name, String text) { waOpen(name, text, "send"); }
+
+                  @JavascriptInterface public void waCall(String name) { waOpen(name, "", "call"); }
+
+                  @JavascriptInterface public void ytPlay(String id) {
+                      if (id == null || id.isEmpty()) { toast("Video nahi mila"); return; }
+                      Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/watch?v=" + id));
+                      if (getPackageManager().getLaunchIntentForPackage("com.google.android.youtube") != null) i.setPackage("com.google.android.youtube");
+                      go(i);
+                  }
+
+                  @JavascriptInterface public void ytSearch(String q) {
+                      try {
+                          Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/results?search_query=" + URLEncoder.encode(q, "UTF-8")));
+                          if (getPackageManager().getLaunchIntentForPackage("com.google.android.youtube") != null) i.setPackage("com.google.android.youtube");
+                          go(i);
+                      } catch (Exception e) { toast("YouTube nahi khuli"); }
+                  }
                   @JavascriptInterface public void panel(String name) {
                       if (name.equals("bluetooth")) go(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));
                       else if (name.equals("wifi")) go(new Intent(Settings.Panel.ACTION_WIFI));
@@ -613,6 +694,108 @@ jobs:
           <voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
               android:sessionService="com.rayyan.jarvis.JarvisSessionService"
               android:supportsAssist="true" />
+          JARVISEOF
+          cat > app/src/main/java/com/rayyan/jarvis/JarvisAccess.java <<'JARVISEOF'
+          package com.rayyan.jarvis;
+
+          import android.accessibilityservice.AccessibilityService;
+          import android.view.accessibility.AccessibilityEvent;
+          import android.view.accessibility.AccessibilityNodeInfo;
+          import java.util.List;
+
+          public class JarvisAccess extends AccessibilityService {
+              public static volatile String pending = "";
+              public static volatile long until = 0;
+              public static volatile boolean callTapped = false;
+              long lastTry = 0;
+
+              @Override
+              public void onAccessibilityEvent(AccessibilityEvent e) {
+                  if (pending.isEmpty() || e == null) return;
+                  long now = System.currentTimeMillis();
+                  if (now > until) { pending = ""; return; }
+                  if (now - lastTry < 350) return;
+                  CharSequence pk = e.getPackageName();
+                  if (pk == null) return;
+                  String p = pk.toString();
+                  if (!p.equals("com.whatsapp.w4b") && !p.equals("com.whatsapp")) return;
+                  AccessibilityNodeInfo root = null;
+                  try {
+                      root = getRootInActiveWindow();
+                      if (root == null) return;
+                      lastTry = now;
+                      if (pending.equals("send")) {
+                          if (tap(root, p + ":id/send", new String[]{"send"}, false)) pending = "";
+                      } else if (pending.equals("call")) {
+                          if (!callTapped) {
+                              if (tap(root, p + ":id/voice_call", new String[]{"voice call", "audio call"}, false)) {
+                                  callTapped = true;
+                                  until = now + 5000;
+                              }
+                          } else if (tap(root, null, new String[]{"call"}, true)) {
+                              pending = "";
+                          }
+                      }
+                  } catch (Exception ex) {
+                  } finally {
+                      if (root != null) { try { root.recycle(); } catch (Exception ex2) { } }
+                  }
+              }
+
+              boolean tap(AccessibilityNodeInfo root, String id, String[] words, boolean byText) {
+                  if (id != null) {
+                      List<AccessibilityNodeInfo> l = root.findAccessibilityNodeInfosByViewId(id);
+                      if (l != null) {
+                          for (AccessibilityNodeInfo n : l) { if (click(n)) return true; }
+                      }
+                  }
+                  AccessibilityNodeInfo f = find(root, words, byText);
+                  return f != null && click(f);
+              }
+
+              AccessibilityNodeInfo find(AccessibilityNodeInfo n, String[] words, boolean byText) {
+                  if (n == null) return null;
+                  CharSequence c = byText ? n.getText() : n.getContentDescription();
+                  if (c != null) {
+                      String s = c.toString().trim();
+                      for (String w : words) { if (s.equalsIgnoreCase(w)) return n; }
+                  }
+                  for (int i = 0; i < n.getChildCount(); i++) {
+                      AccessibilityNodeInfo r = find(n.getChild(i), words, byText);
+                      if (r != null) return r;
+                  }
+                  return null;
+              }
+
+              boolean click(AccessibilityNodeInfo n) {
+                  AccessibilityNodeInfo x = n;
+                  while (x != null) {
+                      if (x.isClickable() && x.isEnabled()) return x.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                      x = x.getParent();
+                  }
+                  return false;
+              }
+
+              @Override
+              public void onInterrupt() { }
+          }
+          JARVISEOF
+          cat > app/src/main/res/xml/accessibility_service.xml <<'JARVISEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagReportViewIds|flagIncludeNotImportantViews"
+              android:canRetrieveWindowContent="true"
+              android:notificationTimeout="100"
+              android:packageNames="com.whatsapp.w4b,com.whatsapp"
+              android:description="@string/access_desc" />
+          JARVISEOF
+          cat > app/src/main/res/values/strings.xml <<'JARVISEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="access_desc">Jarvis sirf WhatsApp mein Send aur Call ka button dabata hai</string>
+          </resources>
           JARVISEOF
       - name: APK banao
         run: gradle assembleDebug --no-daemon
