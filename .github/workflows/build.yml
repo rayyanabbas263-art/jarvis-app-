@@ -17,7 +17,7 @@ jobs:
           gradle-version: '8.9'
       - name: Project banao
         run: |
-          mkdir -p app/src/main/java/com/rayyan/jarvis
+          mkdir -p app/src/main/java/com/rayyan/jarvis app/src/main/res/xml
           cat > settings.gradle <<'JARVISEOF'
           pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
           dependencyResolutionManagement { repositories { google(); mavenCentral() } }
@@ -35,6 +35,7 @@ jobs:
               defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 1; versionName '1.0' }
               compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
           }
+          tasks.withType(JavaCompile) { options.encoding = 'UTF-8' }
           JARVISEOF
           cat > app/src/main/AndroidManifest.xml <<'JARVISEOF'
           <?xml version="1.0" encoding="utf-8"?>
@@ -53,7 +54,15 @@ jobs:
               <application android:label="Jarvis" android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
                   <activity android:name=".MainActivity" android:exported="true" android:configChanges="orientation|screenSize|keyboardHidden">
                       <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+                      <intent-filter><action android:name="android.intent.action.ASSIST"/><category android:name="android.intent.category.DEFAULT"/></intent-filter>
+                      <intent-filter><action android:name="android.intent.action.VOICE_COMMAND"/><category android:name="android.intent.category.DEFAULT"/></intent-filter>
                   </activity>
+                  <service android:name=".JarvisService" android:permission="android.permission.BIND_VOICE_INTERACTION" android:exported="true">
+                      <meta-data android:name="android.voice_interaction" android:resource="@xml/interaction_service"/>
+                      <intent-filter><action android:name="android.service.voice.VoiceInteractionService"/></intent-filter>
+                  </service>
+                  <service android:name=".JarvisSessionService" android:permission="android.permission.BIND_VOICE_INTERACTION" android:exported="true"/>
+                  <service android:name=".JarvisRecognitionService" android:exported="true"/>
               </application>
           </manifest>
           JARVISEOF
@@ -63,15 +72,22 @@ jobs:
           import android.Manifest;
           import android.app.Activity;
           import android.app.AlertDialog;
+          import android.content.ComponentName;
           import android.content.Intent;
           import android.content.SharedPreferences;
+          import android.content.pm.PackageManager;
           import android.content.pm.ResolveInfo;
           import android.database.Cursor;
+          import android.hardware.camera2.CameraCharacteristics;
           import android.hardware.camera2.CameraManager;
+          import android.media.AudioManager;
           import android.net.Uri;
           import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
           import android.provider.AlarmClock;
           import android.provider.ContactsContract;
+          import android.provider.MediaStore;
           import android.provider.Settings;
           import android.speech.RecognitionListener;
           import android.speech.RecognizerIntent;
@@ -93,6 +109,24 @@ jobs:
               WebView w;
               SpeechRecognizer sr;
               SharedPreferences sp;
+              AudioManager am;
+              Handler hd = new Handler(Looper.getMainLooper());
+              boolean muted = false;
+              boolean pendingAssist = false;
+              boolean pageReady = false;
+              Runnable unmuteTask = () -> unmuteBeep();
+              final int[] BEEP = {AudioManager.STREAM_MUSIC, AudioManager.STREAM_NOTIFICATION, AudioManager.STREAM_SYSTEM};
+
+              final String[][] ALIAS = {
+                  {"whatsapp|whatsappbusiness|whatsapp business|व्हाट्सएप|व्हाट्सऐप|वाट्सएप|वॉट्सऐप|واٹس ایپ|واٹساپ", "com.whatsapp.w4b", "com.whatsapp"},
+                  {"instagram|insta|इंस्टाग्राम|انسٹاگرام", "com.instagram.android"},
+                  {"tiktok|tik tok|टिकटॉक|ٹک ٹاک", "com.zhiliaoapp.musically", "com.ss.android.ugc.trill"},
+                  {"youtube|यूट्यूब|یوٹیوب", "com.google.android.youtube"},
+                  {"facebook|फेसबुक|فیس بک", "com.facebook.katana"},
+                  {"chrome|क्रोम|کروم", "com.android.chrome"},
+                  {"snapchat|स्नैपचैट", "com.snapchat.android"},
+                  {"telegram|टेलीग्राम", "org.telegram.messenger"}
+              };
 
               @Override
               protected void onCreate(Bundle b) {
@@ -105,7 +139,13 @@ jobs:
                   s.setDomStorageEnabled(true);
                   s.setMediaPlaybackRequiresUserGesture(false);
                   w.addJavascriptInterface(new Br(), "Android");
-                  w.setWebViewClient(new WebViewClient());
+                  w.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public void onPageFinished(WebView v, String url) {
+                          pageReady = true;
+                          if (pendingAssist) { pendingAssist = false; assistJs(); }
+                      }
+                  });
                   w.setWebChromeClient(new WebChromeClient() {
                       @Override
                       public boolean onJsPrompt(WebView v, String u, String m, String d, final JsPromptResult r) {
@@ -117,8 +157,43 @@ jobs:
                       }
                   });
                   sp = getSharedPreferences("j", 0);
+                  pendingAssist = isAssist(getIntent());
                   String u = sp.getString("u", "");
                   if (u.isEmpty()) ask(); else w.loadUrl(u);
+              }
+
+              boolean isAssist(Intent i) {
+                  if (i == null) return false;
+                  String a = i.getAction();
+                  return Intent.ACTION_ASSIST.equals(a) || Intent.ACTION_VOICE_COMMAND.equals(a) || i.getBooleanExtra("assist", false);
+              }
+
+              void assistJs() { js("if(window.onAssist){window.onAssist();}"); }
+
+              @Override
+              protected void onNewIntent(Intent i) {
+                  super.onNewIntent(i);
+                  setIntent(i);
+                  if (isAssist(i)) { if (pageReady) assistJs(); else pendingAssist = true; }
+              }
+
+              SpeechRecognizer mkSr() {
+                  try {
+                      if (getPackageManager().getLaunchIntentForPackage("com.google.android.googlequicksearchbox") != null) {
+                          return SpeechRecognizer.createSpeechRecognizer(this, new ComponentName("com.google.android.googlequicksearchbox", "com.google.android.voicesearch.serviceapi.GoogleRecognitionService"));
+                      }
+                  } catch (Exception e) { }
+                  return SpeechRecognizer.createSpeechRecognizer(this);
+              }
+
+              @Override
+              protected void onPause() { super.onPause(); unmuteBeep(); }
+
+              @Override
+              protected void onDestroy() {
+                  unmuteBeep();
+                  if (sr != null) { try { sr.destroy(); } catch (Exception e) { } }
+                  super.onDestroy();
               }
 
               void ask() {
@@ -133,8 +208,35 @@ jobs:
                       }).show();
               }
 
+              void muteBeep() {
+                  if (am == null) am = (AudioManager) getSystemService(AUDIO_SERVICE);
+                  if (!muted) {
+                      for (int s : BEEP) { try { am.adjustStreamVolume(s, AudioManager.ADJUST_MUTE, 0); } catch (Exception e) { } }
+                      muted = true;
+                  }
+                  hd.removeCallbacks(unmuteTask);
+                  hd.postDelayed(unmuteTask, 12000);
+              }
+
+              void unmuteBeep() {
+                  hd.removeCallbacks(unmuteTask);
+                  if (!muted || am == null) return;
+                  for (int s : BEEP) { try { am.adjustStreamVolume(s, AudioManager.ADJUST_UNMUTE, 0); } catch (Exception e) { } }
+                  muted = false;
+              }
+
+              void unmuteSoon() {
+                  hd.removeCallbacks(unmuteTask);
+                  hd.postDelayed(unmuteTask, 400);
+              }
+
               void js(final String code) { runOnUiThread(() -> w.evaluateJavascript(code, null)); }
-              void go(Intent i) { try { i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); startActivity(i); } catch (Exception e) { toast("Nahi ho saka: " + e.getMessage()); } }
+
+              void go(Intent i) {
+                  if (i == null) { toast("Nahi ho saka"); return; }
+                  try { i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); startActivity(i); } catch (Exception e) { toast("Nahi ho saka: " + e.getMessage()); }
+              }
+
               void toast(final String t) { runOnUiThread(() -> Toast.makeText(this, t, Toast.LENGTH_LONG).show()); }
 
               String num(String name) {
@@ -149,11 +251,109 @@ jobs:
                   return null;
               }
 
+              String norm(String s) {
+                  StringBuilder b = new StringBuilder();
+                  for (char c : s.toLowerCase().toCharArray()) {
+                      int t = Character.getType(c);
+                      if (Character.isLetterOrDigit(c) || t == Character.NON_SPACING_MARK || t == Character.COMBINING_SPACING_MARK) b.append(c);
+                  }
+                  return b.toString();
+              }
+
+              String clean(String label) {
+                  String[] stop = {"open", "kholo", "khol", "karo", "kro", "do", "app", "application", "please", "ko", "launch", "start", "chalao", "chala", "ओपन", "खोलो", "एप", "एप्लीकेशन", "ऐप", "करो"};
+                  StringBuilder b = new StringBuilder();
+                  for (String t : label.toLowerCase().trim().split("\\s+")) {
+                      boolean skip = false;
+                      for (String s : stop) if (t.equals(s)) skip = true;
+                      if (!skip) b.append(t);
+                  }
+                  String r = norm(b.toString());
+                  return r.isEmpty() ? norm(label) : r;
+              }
+
+              int dist(String a, String b) {
+                  int[] p = new int[b.length() + 1];
+                  for (int j = 0; j <= b.length(); j++) p[j] = j;
+                  for (int i = 1; i <= a.length(); i++) {
+                      int prev = p[0];
+                      p[0] = i;
+                      for (int j = 1; j <= b.length(); j++) {
+                          int tmp = p[j];
+                          p[j] = Math.min(Math.min(p[j] + 1, p[j - 1] + 1), prev + (a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1));
+                          prev = tmp;
+                      }
+                  }
+                  return p[b.length()];
+              }
+
+              boolean near(String a, String b) {
+                  int m = Math.min(a.length(), b.length());
+                  int max = m >= 6 ? 2 : (m >= 4 ? 1 : 0);
+                  return max > 0 && dist(a, b) <= max;
+              }
+
+              boolean launch(String label) {
+                  PackageManager pm = getPackageManager();
+                  String t = clean(label);
+                  if (t.isEmpty()) return false;
+
+                  if (t.equals("camera") || t.equals("कैमरा") || t.equals("کیمرہ")) {
+                      go(new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA));
+                      return true;
+                  }
+                  if (t.equals("settings") || t.equals("setting") || t.equals("सेटिंग") || t.equals("सेटिंग्स")) {
+                      go(new Intent(Settings.ACTION_SETTINGS));
+                      return true;
+                  }
+
+                  for (String[] row : ALIAS) {
+                      boolean hit = false;
+                      for (String n : row[0].split("\\|")) {
+                          String nn = norm(n);
+                          if (nn.isEmpty()) continue;
+                          if (t.equals(nn) || (nn.length() >= 5 && t.contains(nn)) || near(t, nn)) { hit = true; break; }
+                      }
+                      if (!hit) continue;
+                      for (int k = 1; k < row.length; k++) {
+                          Intent li = pm.getLaunchIntentForPackage(row[k]);
+                          if (li != null) { go(li); return true; }
+                      }
+                  }
+
+                  Intent q = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+                  List<ResolveInfo> l = pm.queryIntentActivities(q, 0);
+                  String bestPkg = null;
+                  int best = 0;
+                  for (ResolveInfo r : l) {
+                      String lab = norm(r.loadLabel(pm).toString());
+                      String pkg = r.activityInfo.packageName;
+                      int sc = 0;
+                      if (lab.equals(t)) sc = 100;
+                      else if (lab.length() >= 3 && (lab.contains(t) || t.contains(lab))) sc = Math.max(50, 85 - Math.abs(lab.length() - t.length()));
+                      else if (near(lab, t)) sc = 60;
+                      else if (t.length() >= 4 && pkg.toLowerCase().contains(t)) sc = 40;
+                      if (sc > best) { best = sc; bestPkg = pkg; }
+                  }
+                  if (bestPkg != null) {
+                      Intent li = pm.getLaunchIntentForPackage(bestPkg);
+                      if (li != null) { go(li); return true; }
+                  }
+                  return false;
+              }
+
+              String waPkg() {
+                  for (String p : new String[]{"com.whatsapp.w4b", "com.whatsapp"}) {
+                      if (getPackageManager().getLaunchIntentForPackage(p) != null) return p;
+                  }
+                  return null;
+              }
+
               class Br {
                   @JavascriptInterface public void listen() {
                       runOnUiThread(() -> {
                           if (sr == null) {
-                              sr = SpeechRecognizer.createSpeechRecognizer(MainActivity.this);
+                              sr = mkSr();
                               sr.setRecognitionListener(new RecognitionListener() {
                                   public void onReadyForSpeech(android.os.Bundle p) { }
                                   public void onBeginningOfSpeech() { }
@@ -162,8 +362,9 @@ jobs:
                                   public void onEndOfSpeech() { }
                                   public void onPartialResults(android.os.Bundle p) { }
                                   public void onEvent(int t, android.os.Bundle p) { }
-                                  public void onError(int e) { js("window.onNative('')"); }
+                                  public void onError(int e) { unmuteSoon(); js("window.onNative('')"); }
                                   public void onResults(android.os.Bundle r) {
+                                      unmuteSoon();
                                       ArrayList<String> l = r.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
                                       js("window.onNative(" + JSONObject.quote(l == null || l.isEmpty() ? "" : l.get(0)) + ")");
                                   }
@@ -172,70 +373,11 @@ jobs:
                           Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
                           i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
                           i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN");
+                          muteBeep();
                           sr.startListening(i);
                       });
                   }
 
                   @JavascriptInterface public void torch(boolean on) {
                       try {
-                          CameraManager cm = (CameraManager) getSystemService(CAMERA_SERVICE);
-                          cm.setTorchMode(cm.getCameraIdList()[0], on);
-                      } catch (Exception e) { toast("Torch nahi chali"); }
-                  }
-
-                  @JavascriptInterface public void call(String name) {
-                      String n = num(name);
-                      if (n != null) go(new Intent(Intent.ACTION_CALL, Uri.parse("tel:" + n)));
-                  }
-
-                  @JavascriptInterface public void whatsapp(String name, String text) {
-                      String n = num(name);
-                      if (n == null) return;
-                      n = n.replace("+", "");
-                      if (n.startsWith("0")) n = "92" + n.substring(1);
-                      try {
-                          Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/" + n + "?text=" + URLEncoder.encode(text, "UTF-8")));
-                          i.setPackage("com.whatsapp.w4b");
-                          go(i);
-                      } catch (Exception e) { toast("WhatsApp Business nahi khuli"); }
-                  }
-
-                  @JavascriptInterface public void openApp(String label) {
-                      Intent q = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
-                      List<ResolveInfo> l = getPackageManager().queryIntentActivities(q, 0);
-                      String t = label.toLowerCase().trim();
-                      for (ResolveInfo r : l) {
-                          if (r.loadLabel(getPackageManager()).toString().toLowerCase().contains(t)) {
-                              go(getPackageManager().getLaunchIntentForPackage(r.activityInfo.packageName));
-                              return;
-                          }
-                      }
-                      toast("App nahi mili: " + label);
-                  }
-
-                  @JavascriptInterface public void alarm(int h, int m, String label, String days) {
-                      Intent i = new Intent(AlarmClock.ACTION_SET_ALARM).putExtra(AlarmClock.EXTRA_HOUR, h)
-                          .putExtra(AlarmClock.EXTRA_MINUTES, m).putExtra(AlarmClock.EXTRA_MESSAGE, label)
-                          .putExtra(AlarmClock.EXTRA_SKIP_UI, true);
-                      if (!days.isEmpty()) {
-                          ArrayList<Integer> d = new ArrayList<>();
-                          for (String s : days.split(",")) { try { d.add(Integer.parseInt(s.trim())); } catch (Exception e) { } }
-                          if (!d.isEmpty()) i.putExtra(AlarmClock.EXTRA_DAYS, d);
-                      }
-                      go(i);
-                  }
-
-                  @JavascriptInterface public void panel(String name) {
-                      if (name.equals("bluetooth")) go(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));
-                      else if (name.equals("wifi")) go(new Intent(Settings.Panel.ACTION_WIFI));
-                      else go(new Intent(Settings.Panel.ACTION_INTERNET_CONNECTIVITY));
-                  }
-              }
-          }
-          JARVISEOF
-      - name: APK banao
-        run: gradle assembleDebug --no-daemon
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Jarvis-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+                          CameraManager cm = (CameraManager) getSystemService(CAMER
