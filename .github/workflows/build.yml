@@ -32,7 +32,7 @@ jobs:
           android {
               namespace 'com.rayyan.jarvis'
               compileSdk 34
-              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 7; versionName '1.6' }
+              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 9; versionName '1.8' }
               compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
           }
           tasks.withType(JavaCompile) { options.encoding = 'UTF-8' }
@@ -514,9 +514,7 @@ jobs:
                       return;
                   }
                   if (on) {
-                      JarvisAccess.callTapped = false;
-                      JarvisAccess.pending = mode;
-                      JarvisAccess.until = System.currentTimeMillis() + 15000;
+                      JarvisAccess.arm(mode);
                   } else {
                       toast("Accessibility on nahi hai, Send khud dabana hoga");
                   }
@@ -625,6 +623,24 @@ jobs:
                           go(i);
                       } catch (Exception e) { toast("YouTube nahi khuli"); }
                   }
+                  @JavascriptInterface public String contacts() {
+                      org.json.JSONArray a = new org.json.JSONArray();
+                      java.util.HashSet<String> seen = new java.util.HashSet<>();
+                      try (Cursor c = getContentResolver().query(ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                              new String[]{ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER}, null, null, null)) {
+                          while (c != null && c.moveToNext()) {
+                              String n = c.getString(0);
+                              String p = c.getString(1);
+                              if (n == null || p == null) continue;
+                              if (!seen.add(n.toLowerCase())) continue;
+                              JSONObject o = new JSONObject();
+                              o.put("n", n);
+                              o.put("p", p.replaceAll("[^0-9+]", ""));
+                              a.put(o);
+                          }
+                      } catch (Exception e) { }
+                      return a.toString();
+                  }
                   @JavascriptInterface public void panel(String name) {
                       if (name.equals("bluetooth")) go(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));
                       else if (name.equals("wifi")) go(new Intent(Settings.Panel.ACTION_WIFI));
@@ -699,47 +715,116 @@ jobs:
           package com.rayyan.jarvis;
 
           import android.accessibilityservice.AccessibilityService;
+          import android.os.Handler;
+          import android.os.Looper;
           import android.view.accessibility.AccessibilityEvent;
           import android.view.accessibility.AccessibilityNodeInfo;
+          import android.view.accessibility.AccessibilityWindowInfo;
+          import android.widget.Toast;
           import java.util.List;
 
           public class JarvisAccess extends AccessibilityService {
               public static volatile String pending = "";
               public static volatile long until = 0;
-              public static volatile boolean callTapped = false;
+              public static volatile int dlgClicks = 0;
+              static volatile String dump = "";
+              static volatile int gen = 0;
+              static JarvisAccess inst;
+              static final Handler H = new Handler(Looper.getMainLooper());
+              static final String[] CALL_TXT = {"voice call", "audio call", "call"};
+              static final String[] CALL_DESC = {"voice call", "audio call"};
               long lastTry = 0;
+
+              public static void arm(final String mode) {
+                  pending = mode;
+                  dlgClicks = 0;
+                  dump = "";
+                  gen++;
+                  final int g = gen;
+                  until = System.currentTimeMillis() + 20000;
+                  H.postDelayed(new Runnable() {
+                      public void run() {
+                          if (g != gen || pending.isEmpty()) return;
+                          long now = System.currentTimeMillis();
+                          if (now > until) {
+                              String m = pending;
+                              int c = dlgClicks;
+                              pending = "";
+                              if (inst != null && !(m.equals("calldlg") && c > 0)) {
+                                  String what = m.equals("calldlg") ? "Voice call ka option" : (m.equals("send") ? "Send ka button" : "Call ka button");
+                                  Toast.makeText(inst, "Jarvis: " + what + " nahi mila. Screen par dikha: " + dump, Toast.LENGTH_LONG).show();
+                              }
+                              return;
+                          }
+                          if (inst != null) inst.step();
+                          H.postDelayed(this, 500);
+                      }
+                  }, 800);
+              }
+
+              @Override
+              protected void onServiceConnected() { inst = this; }
+
+              @Override
+              public boolean onUnbind(android.content.Intent i) { inst = null; return super.onUnbind(i); }
 
               @Override
               public void onAccessibilityEvent(AccessibilityEvent e) {
-                  if (pending.isEmpty() || e == null) return;
+                  if (!pending.isEmpty()) step();
+              }
+
+              void step() {
+                  if (pending.isEmpty()) return;
                   long now = System.currentTimeMillis();
-                  if (now > until) { pending = ""; return; }
-                  if (now - lastTry < 350) return;
-                  CharSequence pk = e.getPackageName();
-                  if (pk == null) return;
-                  String p = pk.toString();
-                  if (!p.equals("com.whatsapp.w4b") && !p.equals("com.whatsapp")) return;
-                  AccessibilityNodeInfo root = null;
+                  if (now - lastTry < 250) return;
+                  lastTry = now;
                   try {
-                      root = getRootInActiveWindow();
+                      AccessibilityNodeInfo root = getRootInActiveWindow();
                       if (root == null) return;
-                      lastTry = now;
-                      if (pending.equals("send")) {
+                      CharSequence pk = root.getPackageName();
+                      if (pk == null) return;
+                      String p = pk.toString();
+                      if (!p.equals("com.whatsapp.w4b") && !p.equals("com.whatsapp")) return;
+                      String mode = pending;
+                      if (mode.equals("send")) {
                           if (tap(root, p + ":id/send", new String[]{"send"}, false)) pending = "";
-                      } else if (pending.equals("call")) {
-                          if (!callTapped) {
-                              if (tap(root, p + ":id/voice_call", new String[]{"voice call", "audio call"}, false)) {
-                                  callTapped = true;
-                                  until = now + 5000;
+                          else dump = collect(root);
+                      } else if (mode.equals("call")) {
+                          boolean ok = tap(root, p + ":id/voice_call", CALL_TXT, false);
+                          if (!ok) {
+                              AccessibilityNodeInfo f = findCall(root);
+                              ok = f != null && click(f);
+                          }
+                          if (ok) { pending = "calldlg"; until = now + 8000; dlgClicks = 0; dump = ""; }
+                          else dump = collect(root);
+                      } else if (mode.equals("calldlg")) {
+                          AccessibilityNodeInfo f = pickOption(root);
+                          if (f == null) {
+                              List<AccessibilityWindowInfo> ws = getWindows();
+                              if (ws != null) {
+                                  for (AccessibilityWindowInfo w : ws) {
+                                      AccessibilityNodeInfo r2 = w.getRoot();
+                                      if (r2 == null) continue;
+                                      f = pickOption(r2);
+                                      if (f != null) break;
+                                  }
                               }
-                          } else if (tap(root, null, new String[]{"call"}, true)) {
-                              pending = "";
+                          }
+                          if (f != null && click(f)) {
+                              dlgClicks++;
+                              if (dlgClicks >= 2) pending = "";
+                          } else if (f == null) {
+                              dump = collect(root);
                           }
                       }
                   } catch (Exception ex) {
-                  } finally {
-                      if (root != null) { try { root.recycle(); } catch (Exception ex2) { } }
                   }
+              }
+
+              AccessibilityNodeInfo pickOption(AccessibilityNodeInfo r) {
+                  AccessibilityNodeInfo f = find(r, CALL_TXT, true);
+                  if (f == null) f = find(r, CALL_DESC, false);
+                  return f;
               }
 
               boolean tap(AccessibilityNodeInfo root, String id, String[] words, boolean byText) {
@@ -767,6 +852,38 @@ jobs:
                   return null;
               }
 
+              AccessibilityNodeInfo findCall(AccessibilityNodeInfo n) {
+                  if (n == null) return null;
+                  CharSequence c = n.getContentDescription();
+                  if (c != null && c.length() < 30) {
+                      String s = c.toString().toLowerCase().trim();
+                      if (s.contains("call") && !s.contains("video") && !s.contains("missed") && !s.contains("end") && !s.contains("link")) return n;
+                  }
+                  for (int i = 0; i < n.getChildCount(); i++) {
+                      AccessibilityNodeInfo r = findCall(n.getChild(i));
+                      if (r != null) return r;
+                  }
+                  return null;
+              }
+
+              String collect(AccessibilityNodeInfo r) {
+                  StringBuilder b = new StringBuilder();
+                  walk(r, b, new int[]{0});
+                  return b.toString();
+              }
+
+              void walk(AccessibilityNodeInfo n, StringBuilder b, int[] cnt) {
+                  if (n == null || cnt[0] >= 14) return;
+                  CharSequence c = n.getContentDescription();
+                  if (c == null || c.length() == 0) c = n.getText();
+                  if (c != null && c.length() > 0 && c.length() < 40) {
+                      if (cnt[0] > 0) b.append(", ");
+                      b.append(c);
+                      cnt[0]++;
+                  }
+                  for (int i = 0; i < n.getChildCount(); i++) walk(n.getChild(i), b, cnt);
+              }
+
               boolean click(AccessibilityNodeInfo n) {
                   AccessibilityNodeInfo x = n;
                   while (x != null) {
@@ -785,7 +902,7 @@ jobs:
           <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
               android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
               android:accessibilityFeedbackType="feedbackGeneric"
-              android:accessibilityFlags="flagReportViewIds|flagIncludeNotImportantViews"
+              android:accessibilityFlags="flagReportViewIds|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows"
               android:canRetrieveWindowContent="true"
               android:notificationTimeout="100"
               android:packageNames="com.whatsapp.w4b,com.whatsapp"
