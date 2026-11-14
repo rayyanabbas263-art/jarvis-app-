@@ -32,7 +32,7 @@ jobs:
           android {
               namespace 'com.rayyan.jarvis'
               compileSdk 34
-              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 5; versionName '1.4' }
+              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 6; versionName '1.5' }
               compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
           }
           tasks.withType(JavaCompile) { options.encoding = 'UTF-8' }
@@ -589,6 +589,7 @@ jobs:
               @Override
               public void onShow(Bundle args, int showFlags) {
                   super.onShow(args, showFlags);
+                  try { Toast.makeText(getContext(), "Jarvis assistant ko bulaya gaya", Toast.LENGTH_SHORT).show(); } catch (Exception ex) { }
                   Intent i = new Intent(getContext(), MainActivity.class);
                   i.setAction(Intent.ACTION_ASSIST);
                   i.putExtra("assist", true);
