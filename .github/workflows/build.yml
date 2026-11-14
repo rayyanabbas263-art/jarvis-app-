@@ -32,7 +32,7 @@ jobs:
           android {
               namespace 'com.rayyan.jarvis'
               compileSdk 34
-              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 2; versionName '1.1' }
+              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 5; versionName '1.4' }
               compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
           }
           tasks.withType(JavaCompile) { options.encoding = 'UTF-8' }
@@ -53,7 +53,7 @@ jobs:
                   <intent><action android:name="android.speech.RecognitionService"/></intent>
               </queries>
               <application android:label="Jarvis" android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
-                  <activity android:name=".MainActivity" android:exported="true" android:configChanges="orientation|screenSize|keyboardHidden">
+                  <activity android:name=".MainActivity" android:exported="true" android:showWhenLocked="true" android:configChanges="orientation|screenSize|keyboardHidden">
                       <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
                       <intent-filter><action android:name="android.intent.action.ASSIST"/><category android:name="android.intent.category.DEFAULT"/></intent-filter>
                       <intent-filter><action android:name="android.intent.action.VOICE_COMMAND"/><category android:name="android.intent.category.DEFAULT"/></intent-filter>
@@ -116,6 +116,8 @@ jobs:
               boolean pendingAssist = false;
               boolean pageReady = false;
               Runnable unmuteTask = () -> unmuteBeep();
+          Runnable closeTask = () -> { destroySr(); finishAndRemoveTask(); };
+          Runnable silenceTask = () -> { if (sr != null) { destroySr(); unmuteSoon(); sendErr(6); } };
               final int[] BEEP = {AudioManager.STREAM_MUSIC, AudioManager.STREAM_NOTIFICATION, AudioManager.STREAM_SYSTEM};
 
               final String[][] ALIAS = {
@@ -193,6 +195,7 @@ jobs:
                   }
 
                   void destroySr() {
+                      hd.removeCallbacks(silenceTask);
                       SpeechRecognizer old = sr;
                       sr = null;
                       if (old != null) {
@@ -243,7 +246,7 @@ jobs:
                       sr = me;
                       me.setRecognitionListener(new RecognitionListener() {
                           public void onReadyForSpeech(android.os.Bundle p) { }
-                          public void onBeginningOfSpeech() { }
+                          public void onBeginningOfSpeech() { if (me == sr) hd.removeCallbacks(silenceTask); }
                           public void onRmsChanged(float v) { }
                           public void onBufferReceived(byte[] p) { }
                           public void onEndOfSpeech() { }
@@ -251,6 +254,7 @@ jobs:
                           public void onEvent(int t, android.os.Bundle p) { }
                           public void onError(final int e) {
                               if (me != sr) return;
+                              hd.removeCallbacks(silenceTask);
                               if (google && e != 6 && e != 7 && e != 9) {
                                   hd.post(() -> startListen(false));
                                   return;
@@ -261,6 +265,7 @@ jobs:
                           }
                           public void onResults(android.os.Bundle r) {
                               if (me != sr) return;
+                              hd.removeCallbacks(silenceTask);
                               unmuteSoon();
                               ArrayList<String> l = r.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
                               js("window.onNative(" + JSONObject.quote(l == null || l.isEmpty() ? "" : l.get(0)) + ")");
@@ -272,6 +277,8 @@ jobs:
                       i.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, getPackageName());
                       i.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false);
                       i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
+                      hd.removeCallbacks(silenceTask);
+                      hd.postDelayed(silenceTask, 5000);
                       try {
                           me.startListening(i);
                       } catch (Exception ex) {
@@ -282,6 +289,21 @@ jobs:
 
               @Override
               protected void onPause() { super.onPause(); unmuteBeep(); }
+
+              @Override
+              protected void onStop() {
+                  super.onStop();
+                  destroySr();
+                  unmuteBeep();
+                  hd.removeCallbacks(closeTask);
+                  hd.postDelayed(closeTask, 40000);
+              }
+
+              @Override
+              protected void onStart() {
+                  super.onStart();
+                  hd.removeCallbacks(closeTask);
+              }
 
               @Override
               protected void onDestroy() {
@@ -457,7 +479,11 @@ jobs:
                               });
                           }
 
-                  @JavascriptInterface public void torch(boolean on) {
+                  @JavascriptInterface public void stopListen() {
+                              runOnUiThread(() -> { destroySr(); unmuteSoon(); });
+                          }
+
+                          @JavascriptInterface public void torch(boolean on) {
                       try {
                           CameraManager cm = (CameraManager) getSystemService(CAMERA_SERVICE);
                           String id = null;
@@ -555,6 +581,7 @@ jobs:
           import android.content.Intent;
           import android.os.Bundle;
           import android.service.voice.VoiceInteractionSession;
+          import android.widget.Toast;
 
           public class JarvisSession extends VoiceInteractionSession {
               public JarvisSession(Context c) { super(c); }
@@ -567,15 +594,18 @@ jobs:
                   i.putExtra("assist", true);
                   try {
                       startAssistantActivity(i);
-                  } catch (Exception e) {
-                      try {
-                          i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                          getContext().startActivity(i);
-                      } catch (Exception e2) { }
+                      return;
+                  } catch (Exception e1) { }
+                  try {
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                      getContext().startActivity(i);
+                  } catch (Exception e2) {
+                      try { Toast.makeText(getContext(), "Jarvis khul nahi saka: " + e2.getMessage(), Toast.LENGTH_LONG).show(); } catch (Exception e3) { }
                   }
                   hide();
               }
           }
+
           JARVISEOF
           cat > app/src/main/res/xml/interaction_service.xml <<'JARVISEOF'
           <?xml version="1.0" encoding="utf-8"?>
