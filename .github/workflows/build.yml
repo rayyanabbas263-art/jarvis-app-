@@ -32,7 +32,7 @@ jobs:
           android {
               namespace 'com.rayyan.jarvis'
               compileSdk 34
-              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 1; versionName '1.0' }
+              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 2; versionName '1.1' }
               compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
           }
           tasks.withType(JavaCompile) { options.encoding = 'UTF-8' }
@@ -50,6 +50,7 @@ jobs:
               <queries>
                   <intent><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent>
                   <package android:name="com.whatsapp.w4b"/>
+                  <intent><action android:name="android.speech.RecognitionService"/></intent>
               </queries>
               <application android:label="Jarvis" android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
                   <activity android:name=".MainActivity" android:exported="true" android:configChanges="orientation|screenSize|keyboardHidden">
@@ -62,7 +63,6 @@ jobs:
                       <intent-filter><action android:name="android.service.voice.VoiceInteractionService"/></intent-filter>
                   </service>
                   <service android:name=".JarvisSessionService" android:permission="android.permission.BIND_VOICE_INTERACTION" android:exported="true"/>
-                  <service android:name=".JarvisRecognitionService" android:exported="true"/>
               </application>
           </manifest>
           JARVISEOF
@@ -94,6 +94,7 @@ jobs:
           import android.speech.SpeechRecognizer;
           import android.webkit.JavascriptInterface;
           import android.webkit.JsPromptResult;
+          import android.webkit.PermissionRequest;
           import android.webkit.WebChromeClient;
           import android.webkit.WebSettings;
           import android.webkit.WebView;
@@ -147,6 +148,11 @@ jobs:
                       }
                   });
                   w.setWebChromeClient(new WebChromeClient() {
+                              @Override
+                              public void onPermissionRequest(final PermissionRequest r) {
+                                  runOnUiThread(() -> { try { r.grant(r.getResources()); } catch (Exception e) { } });
+                              }
+
                       @Override
                       public boolean onJsPrompt(WebView v, String u, String m, String d, final JsPromptResult r) {
                           final EditText e = new EditText(MainActivity.this);
@@ -177,14 +183,102 @@ jobs:
                   if (isAssist(i)) { if (pageReady) assistJs(); else pendingAssist = true; }
               }
 
-              SpeechRecognizer mkSr() {
-                  try {
-                      if (getPackageManager().getLaunchIntentForPackage("com.google.android.googlequicksearchbox") != null) {
-                          return SpeechRecognizer.createSpeechRecognizer(this, new ComponentName("com.google.android.googlequicksearchbox", "com.google.android.voicesearch.serviceapi.GoogleRecognitionService"));
+                  SpeechRecognizer mkGoogleSr() {
+                      try {
+                          if (getPackageManager().getLaunchIntentForPackage("com.google.android.googlequicksearchbox") != null) {
+                              return SpeechRecognizer.createSpeechRecognizer(this, new ComponentName("com.google.android.googlequicksearchbox", "com.google.android.voicesearch.serviceapi.GoogleRecognitionService"));
+                          }
+                      } catch (Exception e) { }
+                      return null;
+                  }
+
+                  void destroySr() {
+                      SpeechRecognizer old = sr;
+                      sr = null;
+                      if (old != null) {
+                          try { old.cancel(); } catch (Exception e) { }
+                          try { old.destroy(); } catch (Exception e) { }
                       }
-                  } catch (Exception e) { }
-                  return SpeechRecognizer.createSpeechRecognizer(this);
-              }
+                  }
+
+                  String errName(int e) {
+                      switch (e) {
+                          case 1: return "network timeout";
+                          case 2: return "network";
+                          case 3: return "audio";
+                          case 4: return "server";
+                          case 5: return "client";
+                          case 6: return "kuch bola nahi";
+                          case 7: return "samajh nahi aaya";
+                          case 8: return "recognizer busy";
+                          case 9: return "permission nahi";
+                          case 10: return "bohat requests";
+                          case 11: return "server disconnect";
+                          case 12: return "language support nahi";
+                          case 13: return "language available nahi";
+                          default: return "code " + e;
+                      }
+                  }
+
+                  void sendErr(int e) {
+                      if (e == 6 || e == 7) js("window.onNative('')");
+                      else js("if(window.onNativeError){window.onNativeError(" + e + ")}else{window.onNative('')}");
+                  }
+
+                  void startListen(final boolean google) {
+                      destroySr();
+                      SpeechRecognizer x = null;
+                      try {
+                          if (google) x = mkGoogleSr();
+                          else if (SpeechRecognizer.isRecognitionAvailable(this)) x = SpeechRecognizer.createSpeechRecognizer(this);
+                      } catch (Exception e) { x = null; }
+                      if (x == null) {
+                          if (google) { startListen(false); return; }
+                          unmuteSoon();
+                          toast("Mic masla: phone mein awaaz sunne wali service nahi mili");
+                          sendErr(5);
+                          return;
+                      }
+                      final SpeechRecognizer me = x;
+                      sr = me;
+                      me.setRecognitionListener(new RecognitionListener() {
+                          public void onReadyForSpeech(android.os.Bundle p) { }
+                          public void onBeginningOfSpeech() { }
+                          public void onRmsChanged(float v) { }
+                          public void onBufferReceived(byte[] p) { }
+                          public void onEndOfSpeech() { }
+                          public void onPartialResults(android.os.Bundle p) { }
+                          public void onEvent(int t, android.os.Bundle p) { }
+                          public void onError(final int e) {
+                              if (me != sr) return;
+                              if (google && e != 6 && e != 7 && e != 9) {
+                                  hd.post(() -> startListen(false));
+                                  return;
+                              }
+                              unmuteSoon();
+                              if (e != 6 && e != 7) toast("Mic masla: " + errName(e));
+                              sendErr(e);
+                          }
+                          public void onResults(android.os.Bundle r) {
+                              if (me != sr) return;
+                              unmuteSoon();
+                              ArrayList<String> l = r.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                              js("window.onNative(" + JSONObject.quote(l == null || l.isEmpty() ? "" : l.get(0)) + ")");
+                          }
+                      });
+                      Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+                      i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+                      i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN");
+                      i.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, getPackageName());
+                      i.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false);
+                      i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
+                      try {
+                          me.startListening(i);
+                      } catch (Exception ex) {
+                          if (google) hd.post(() -> startListen(false));
+                          else { unmuteSoon(); toast("Mic masla: start nahi hua"); sendErr(5); }
+                      }
+                  }
 
               @Override
               protected void onPause() { super.onPause(); unmuteBeep(); }
@@ -350,33 +444,18 @@ jobs:
               }
 
               class Br {
-                  @JavascriptInterface public void listen() {
-                      runOnUiThread(() -> {
-                          if (sr == null) {
-                              sr = mkSr();
-                              sr.setRecognitionListener(new RecognitionListener() {
-                                  public void onReadyForSpeech(android.os.Bundle p) { }
-                                  public void onBeginningOfSpeech() { }
-                                  public void onRmsChanged(float v) { }
-                                  public void onBufferReceived(byte[] p) { }
-                                  public void onEndOfSpeech() { }
-                                  public void onPartialResults(android.os.Bundle p) { }
-                                  public void onEvent(int t, android.os.Bundle p) { }
-                                  public void onError(int e) { unmuteSoon(); js("window.onNative('')"); }
-                                  public void onResults(android.os.Bundle r) {
-                                      unmuteSoon();
-                                      ArrayList<String> l = r.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
-                                      js("window.onNative(" + JSONObject.quote(l == null || l.isEmpty() ? "" : l.get(0)) + ")");
+                          @JavascriptInterface public void listen() {
+                              runOnUiThread(() -> {
+                                  if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                                      requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 1);
+                                      toast("Mic ki permission Allow karo, phir dobara dabao");
+                                      sendErr(9);
+                                      return;
                                   }
+                                  muteBeep();
+                                  startListen(true);
                               });
                           }
-                          Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-                          i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-                          i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN");
-                          muteBeep();
-                          sr.startListening(i);
-                      });
-                  }
 
                   @JavascriptInterface public void torch(boolean on) {
                       try {
@@ -498,31 +577,10 @@ jobs:
               }
           }
           JARVISEOF
-          cat > app/src/main/java/com/rayyan/jarvis/JarvisRecognitionService.java <<'JARVISEOF'
-          package com.rayyan.jarvis;
-
-          import android.content.Intent;
-          import android.speech.RecognitionService;
-          import android.speech.SpeechRecognizer;
-
-          public class JarvisRecognitionService extends RecognitionService {
-              @Override
-              protected void onStartListening(Intent i, Callback c) {
-                  try { c.error(SpeechRecognizer.ERROR_CLIENT); } catch (Exception e) { }
-              }
-
-              @Override
-              protected void onCancel(Callback c) { }
-
-              @Override
-              protected void onStopListening(Callback c) { }
-          }
-          JARVISEOF
           cat > app/src/main/res/xml/interaction_service.xml <<'JARVISEOF'
           <?xml version="1.0" encoding="utf-8"?>
           <voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
               android:sessionService="com.rayyan.jarvis.JarvisSessionService"
-              android:recognitionService="com.rayyan.jarvis.JarvisRecognitionService"
               android:supportsAssist="true" />
           JARVISEOF
       - name: APK banao
