@@ -32,7 +32,7 @@ jobs:
           android {
               namespace 'com.rayyan.jarvis'
               compileSdk 34
-              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 9; versionName '1.8' }
+              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 11; versionName '2.0' }
               compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
           }
           tasks.withType(JavaCompile) { options.encoding = 'UTF-8' }
@@ -67,6 +67,7 @@ jobs:
                       <intent-filter><action android:name="android.accessibilityservice.AccessibilityService"/></intent-filter>
                       <meta-data android:name="android.accessibilityservice" android:resource="@xml/accessibility_service"/>
                   </service>
+                  <provider android:name=".VoiceProvider" android:authorities="com.rayyan.jarvis.vfp" android:exported="false" android:grantUriPermissions="true"/>
               </application>
           </manifest>
           JARVISEOF
@@ -517,6 +518,7 @@ jobs:
                       JarvisAccess.arm(mode);
                   } else {
                       toast("Accessibility on nahi hai, Send khud dabana hoga");
+                      JarvisAccess.voice = null;
                   }
                   try {
                       String u = "https://wa.me/" + n;
@@ -577,7 +579,8 @@ jobs:
                   }
 
                   @JavascriptInterface public void openApp(String label) {
-                      if (!launch(label)) toast("App nahi mili: " + label);
+                      if (!launch(label)) { toast("App nahi mili: " + label); JarvisAccess.voice = null; }
+                      else JarvisAccess.sayVoice(1300);
                   }
 
                   @JavascriptInterface public void alarm(int h, int m, String label, String days) {
@@ -640,6 +643,46 @@ jobs:
                           }
                       } catch (Exception e) { }
                       return a.toString();
+                  }
+                  @JavascriptInterface public void queueSpeech(String b64, int rate, String mode) {
+                      try {
+                          byte[] pcm = android.util.Base64.decode(b64, android.util.Base64.DEFAULT);
+                          JarvisAccess.voiceRate = rate;
+                          JarvisAccess.voiceAt = System.currentTimeMillis();
+                          JarvisAccess.voice = pcm;
+                          if (mode.equals("now")) JarvisAccess.sayVoice(1300);
+                      } catch (Exception e) { }
+                  }
+                  @JavascriptInterface public void waVoice(String name, String b64, int rate) {
+                      try {
+                          String n = num(name);
+                          if (n == null) return;
+                          n = n.replaceAll("[^0-9]", "");
+                          if (n.startsWith("0")) n = "92" + n.substring(1);
+                          String pk = waPkg();
+                          if (pk == null) { toast("WhatsApp install nahi mili"); JarvisAccess.voice = null; return; }
+                          if (!isAccessOn()) {
+                              toast("Pehle Accessibility mein Jarvis ko on karo");
+                              JarvisAccess.voice = null;
+                              go(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+                              return;
+                          }
+                          byte[] pcm = android.util.Base64.decode(b64, android.util.Base64.DEFAULT);
+                          java.io.File f = VoiceNote.make(getCacheDir(), pcm, rate);
+                          if (f == null) { toast("Voice note ki file nahi ban saki"); JarvisAccess.voice = null; return; }
+                          Uri u = Uri.parse("content://com.rayyan.jarvis.vfp/" + f.getName());
+                          Intent i = new Intent(Intent.ACTION_SEND);
+                          i.setType(VoiceNote.mime);
+                          i.putExtra(Intent.EXTRA_STREAM, u);
+                          i.putExtra("jid", n + "@s.whatsapp.net");
+                          i.setPackage(pk);
+                          i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                          JarvisAccess.arm("send");
+                          go(i);
+                      } catch (Exception e) {
+                          JarvisAccess.voice = null;
+                          toast("Voice note nahi ja saka");
+                      }
                   }
                   @JavascriptInterface public void panel(String name) {
                       if (name.equals("bluetooth")) go(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));
@@ -716,6 +759,10 @@ jobs:
 
           import android.accessibilityservice.AccessibilityService;
           import android.os.Handler;
+          import android.media.AudioAttributes;
+          import android.media.AudioFormat;
+          import android.media.AudioManager;
+          import android.media.AudioTrack;
           import android.os.Looper;
           import android.view.accessibility.AccessibilityEvent;
           import android.view.accessibility.AccessibilityNodeInfo;
@@ -729,6 +776,9 @@ jobs:
               public static volatile int dlgClicks = 0;
               static volatile String dump = "";
               static volatile int gen = 0;
+              public static volatile byte[] voice = null;
+              public static volatile int voiceRate = 24000;
+              public static volatile long voiceAt = 0;
               static JarvisAccess inst;
               static final Handler H = new Handler(Looper.getMainLooper());
               static final String[] CALL_TXT = {"voice call", "audio call", "call"};
@@ -750,6 +800,7 @@ jobs:
                               String m = pending;
                               int c = dlgClicks;
                               pending = "";
+                              if (m.equals("send")) voice = null;
                               if (inst != null && !(m.equals("calldlg") && c > 0)) {
                                   String what = m.equals("calldlg") ? "Voice call ka option" : (m.equals("send") ? "Send ka button" : "Call ka button");
                                   Toast.makeText(inst, "Jarvis: " + what + " nahi mila. Screen par dikha: " + dump, Toast.LENGTH_LONG).show();
@@ -760,6 +811,34 @@ jobs:
                           H.postDelayed(this, 500);
                       }
                   }, 800);
+              }
+
+              public static void sayVoice(long delay) {
+                  final byte[] v = voice;
+                  final int r = voiceRate;
+                  voice = null;
+                  if (v == null || System.currentTimeMillis() - voiceAt > 60000) return;
+                  H.postDelayed(new Runnable() {
+                      public void run() { playPcm(v, r); }
+                  }, delay);
+              }
+
+              static void playPcm(final byte[] pcm, final int rate) {
+                  new Thread(new Runnable() {
+                      public void run() {
+                          try {
+                              int len = pcm.length & ~1;
+                              AudioTrack t = new AudioTrack(
+                                  new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build(),
+                                  new AudioFormat.Builder().setSampleRate(rate).setEncoding(AudioFormat.ENCODING_PCM_16BIT).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build(),
+                                  len, AudioTrack.MODE_STATIC, AudioManager.AUDIO_SESSION_ID_GENERATE);
+                              t.write(pcm, 0, len);
+                              t.play();
+                              Thread.sleep(len * 1000L / (rate * 2L) + 600);
+                              t.release();
+                          } catch (Exception e) { }
+                      }
+                  }).start();
               }
 
               @Override
@@ -787,7 +866,7 @@ jobs:
                       if (!p.equals("com.whatsapp.w4b") && !p.equals("com.whatsapp")) return;
                       String mode = pending;
                       if (mode.equals("send")) {
-                          if (tap(root, p + ":id/send", new String[]{"send"}, false)) pending = "";
+                          if (tap(root, p + ":id/send", new String[]{"send"}, false) || tap(root, null, new String[]{"send"}, true)) { pending = ""; sayVoice(900); }
                           else dump = collect(root);
                       } else if (mode.equals("call")) {
                           boolean ok = tap(root, p + ":id/voice_call", CALL_TXT, false);
@@ -913,6 +992,184 @@ jobs:
           <resources>
               <string name="access_desc">Jarvis sirf WhatsApp mein Send aur Call ka button dabata hai</string>
           </resources>
+          JARVISEOF
+          cat > app/src/main/java/com/rayyan/jarvis/VoiceProvider.java <<'JARVISEOF'
+          package com.rayyan.jarvis;
+
+          import android.content.ContentProvider;
+          import android.content.ContentValues;
+          import android.database.Cursor;
+          import android.database.MatrixCursor;
+          import android.net.Uri;
+          import android.os.ParcelFileDescriptor;
+          import android.provider.OpenableColumns;
+          import java.io.File;
+          import java.io.FileNotFoundException;
+
+          public class VoiceProvider extends ContentProvider {
+              @Override
+              public boolean onCreate() { return true; }
+
+              File file(Uri u) {
+                  String n = u.getLastPathSegment();
+                  if (n == null || n.contains("/") || n.contains("..")) return null;
+                  File f = new File(getContext().getCacheDir(), n);
+                  return f.exists() ? f : null;
+              }
+
+              @Override
+              public Cursor query(Uri u, String[] proj, String sel, String[] args, String sort) {
+                  File f = file(u);
+                  if (f == null) return null;
+                  MatrixCursor c = new MatrixCursor(new String[]{OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE});
+                  c.addRow(new Object[]{f.getName(), Long.valueOf(f.length())});
+                  return c;
+              }
+
+              @Override
+              public String getType(Uri u) {
+                  File f = file(u);
+                  return (f != null && f.getName().endsWith(".m4a")) ? "audio/mp4" : "audio/ogg";
+              }
+
+              @Override
+              public ParcelFileDescriptor openFile(Uri u, String mode) throws FileNotFoundException {
+                  File f = file(u);
+                  if (f == null) throw new FileNotFoundException();
+                  return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY);
+              }
+
+              @Override
+              public Uri insert(Uri u, ContentValues v) { return null; }
+
+              @Override
+              public int delete(Uri u, String s, String[] a) { return 0; }
+
+              @Override
+              public int update(Uri u, ContentValues v, String s, String[] a) { return 0; }
+          }
+          JARVISEOF
+          cat > app/src/main/java/com/rayyan/jarvis/VoiceNote.java <<'JARVISEOF'
+          package com.rayyan.jarvis;
+
+          import android.media.MediaCodec;
+          import android.media.MediaFormat;
+          import android.media.MediaMuxer;
+          import android.os.Build;
+          import java.io.File;
+          import java.nio.ByteBuffer;
+
+          public class VoiceNote {
+              public static String mime = "audio/ogg";
+
+              public static File make(File dir, byte[] pcm, int rate) {
+                  try {
+                      File[] old = dir.listFiles();
+                      if (old != null) {
+                          for (File o : old) { if (o.getName().startsWith("jarvis_voice")) o.delete(); }
+                      }
+                  } catch (Exception e) { }
+                  long id = System.currentTimeMillis();
+                  try {
+                      if (rate != 8000 && rate != 12000 && rate != 16000 && rate != 24000 && rate != 48000) {
+                          pcm = resample(pcm, rate, 24000);
+                          rate = 24000;
+                      }
+                      if (Build.VERSION.SDK_INT >= 29) {
+                          File f = new File(dir, "jarvis_voice_" + id + ".opus");
+                          if (encode(f, pcm, rate, "audio/opus", 4, 32000)) { mime = "audio/ogg"; return f; }
+                      }
+                  } catch (Throwable t) { }
+                  try {
+                      File f = new File(dir, "jarvis_voice_" + id + ".m4a");
+                      if (encode(f, pcm, rate, "audio/mp4a-latm", 0, 48000)) { mime = "audio/mp4"; return f; }
+                  } catch (Throwable t) { }
+                  return null;
+              }
+
+              static boolean encode(File out, byte[] pcm, int rate, String mimeType, int container, int bitrate) throws Exception {
+                  MediaFormat f = MediaFormat.createAudioFormat(mimeType, rate, 1);
+                  f.setInteger(MediaFormat.KEY_BIT_RATE, bitrate);
+                  if (mimeType.equals("audio/mp4a-latm")) f.setInteger(MediaFormat.KEY_AAC_PROFILE, 2);
+                  f.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384);
+                  if (out.exists()) out.delete();
+                  MediaCodec c = MediaCodec.createEncoderByType(mimeType);
+                  MediaMuxer m = null;
+                  boolean started = false;
+                  try {
+                      c.configure(f, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+                      c.start();
+                      m = new MediaMuxer(out.getAbsolutePath(), container);
+                      int track = -1;
+                      MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+                      int pos = 0;
+                      boolean inDone = false;
+                      boolean outDone = false;
+                      for (int guard = 0; !outDone && guard < 40000; guard++) {
+                          if (!inDone) {
+                              int ib = c.dequeueInputBuffer(10000);
+                              if (ib >= 0) {
+                                  ByteBuffer buf = c.getInputBuffer(ib);
+                                  buf.clear();
+                                  int n = Math.min(buf.remaining(), pcm.length - pos);
+                                  n = n & ~1;
+                                  long ts = (long) (pos / 2) * 1000000L / rate;
+                                  if (n <= 0) {
+                                      c.queueInputBuffer(ib, 0, 0, ts, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                                      inDone = true;
+                                  } else {
+                                      buf.put(pcm, pos, n);
+                                      c.queueInputBuffer(ib, 0, n, ts, 0);
+                                      pos += n;
+                                  }
+                              }
+                          }
+                          int ob = c.dequeueOutputBuffer(info, 10000);
+                          if (ob == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                              track = m.addTrack(c.getOutputFormat());
+                              m.start();
+                              started = true;
+                          } else if (ob >= 0) {
+                              ByteBuffer o = c.getOutputBuffer(ob);
+                              if ((info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) info.size = 0;
+                              if (info.size > 0 && started) {
+                                  o.position(info.offset);
+                                  o.limit(info.offset + info.size);
+                                  m.writeSampleData(track, o, info);
+                              }
+                              c.releaseOutputBuffer(ob, false);
+                              if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) outDone = true;
+                          }
+                      }
+                      return started && outDone && out.length() > 0;
+                  } finally {
+                      try { c.stop(); } catch (Exception e) { }
+                      try { c.release(); } catch (Exception e) { }
+                      if (m != null) {
+                          try { if (started) m.stop(); } catch (Exception e) { }
+                          try { m.release(); } catch (Exception e) { }
+                      }
+                  }
+              }
+
+              static byte[] resample(byte[] in, int from, int to) {
+                  int n = in.length / 2;
+                  short[] s = new short[n];
+                  for (int i = 0; i < n; i++) s[i] = (short) ((in[2 * i] & 0xff) | (in[2 * i + 1] << 8));
+                  int m = (int) ((long) n * to / from);
+                  byte[] out = new byte[m * 2];
+                  for (int i = 0; i < m; i++) {
+                      double p = (double) i * from / to;
+                      int a = (int) p;
+                      int b = Math.min(a + 1, n - 1);
+                      double fr = p - a;
+                      short v = (short) (s[a] * (1 - fr) + s[b] * fr);
+                      out[2 * i] = (byte) (v & 0xff);
+                      out[2 * i + 1] = (byte) ((v >> 8) & 0xff);
+                  }
+                  return out;
+              }
+          }
           JARVISEOF
       - name: APK banao
         run: gradle assembleDebug --no-daemon
