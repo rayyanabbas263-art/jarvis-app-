@@ -32,7 +32,7 @@ jobs:
           android {
               namespace 'com.rayyan.jarvis'
               compileSdk 34
-              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 13; versionName '2.2' }
+              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 15; versionName '2.4' }
               compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
           }
           tasks.withType(JavaCompile) { options.encoding = 'UTF-8' }
@@ -47,6 +47,7 @@ jobs:
               <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
               <uses-permission android:name="com.android.alarm.permission.SET_ALARM"/>
               <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>
+              <uses-permission android:name="android.permission.WAKE_LOCK"/>
               <queries>
                   <intent><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent>
                   <package android:name="com.whatsapp.w4b"/>
@@ -357,6 +358,7 @@ jobs:
 
               void go(Intent i) {
                   if (i == null) { toast("Nahi ho saka"); return; }
+                  JarvisAccess.wake(this, 30000);
                   try { i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); startActivity(i); } catch (Exception e) { toast("Nahi ho saka: " + e.getMessage()); }
               }
 
@@ -686,6 +688,24 @@ jobs:
                           toast("Voice note nahi ja saka");
                       }
                   }
+                  @JavascriptInterface public void maps(String q, boolean nav, String mode) {
+                      try {
+                          String m = (mode == null || mode.isEmpty()) ? "d" : mode;
+                          Uri u;
+                          if (nav) u = Uri.parse("google.navigation:q=" + Uri.encode(q) + "&mode=" + m);
+                          else u = Uri.parse("geo:0,0?q=" + Uri.encode(q));
+                          Intent i = new Intent(Intent.ACTION_VIEW, u);
+                          if (getPackageManager().getLaunchIntentForPackage("com.google.android.apps.maps") != null) i.setPackage("com.google.android.apps.maps");
+                          go(i);
+                          JarvisAccess.sayVoice(1300);
+                      } catch (Exception e) {
+                          JarvisAccess.voice = null;
+                          toast("Maps nahi khuli");
+                      }
+                  }
+                  @JavascriptInterface public void keepScreen(final boolean on) {
+                      runOnUiThread(() -> w.setKeepScreenOn(on));
+                  }
                   @JavascriptInterface public void panel(String name) {
                       if (name.equals("bluetooth")) go(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));
                       else if (name.equals("wifi")) go(new Intent(Settings.Panel.ACTION_WIFI));
@@ -765,7 +785,9 @@ jobs:
           import android.media.AudioFormat;
           import android.media.AudioManager;
           import android.media.AudioTrack;
+          import android.content.Context;
           import android.os.Looper;
+          import android.os.PowerManager;
           import android.view.accessibility.AccessibilityEvent;
           import android.view.accessibility.AccessibilityNodeInfo;
           import android.view.accessibility.AccessibilityWindowInfo;
@@ -782,7 +804,17 @@ jobs:
               public static volatile byte[] voice = null;
               public static volatile int voiceRate = 24000;
               public static volatile long voiceAt = 0;
+              static PowerManager.WakeLock wl;
               static JarvisAccess inst;
+
+              public static void wake(Context c, long ms) {
+                  try {
+                      PowerManager pm = (PowerManager) c.getSystemService(Context.POWER_SERVICE);
+                      if (wl != null && wl.isHeld()) wl.release();
+                      wl = pm.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP, "jarvis:run");
+                      wl.acquire(ms);
+                  } catch (Exception e) { }
+              }
               static final Handler H = new Handler(Looper.getMainLooper());
               static final String[] CALL_TXT = {"voice call", "audio call", "call"};
               static final String[] CALL_DESC = {"voice call", "audio call"};
@@ -793,6 +825,7 @@ jobs:
                   dlgClicks = 0;
                   okAt = 0;
                   dump = "";
+                  if (inst != null) wake(inst, 30000);
                   gen++;
                   final int g = gen;
                   until = System.currentTimeMillis() + 20000;
