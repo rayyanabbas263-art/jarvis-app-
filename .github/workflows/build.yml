@@ -32,7 +32,7 @@ jobs:
           android {
               namespace 'com.rayyan.jarvis'
               compileSdk 34
-              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 12; versionName '2.1' }
+              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 13; versionName '2.2' }
               compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
           }
           tasks.withType(JavaCompile) { options.encoding = 'UTF-8' }
@@ -273,7 +273,9 @@ jobs:
                               hd.removeCallbacks(silenceTask);
                               unmuteSoon();
                               ArrayList<String> l = r.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
-                              js("window.onNative(" + JSONObject.quote(l == null || l.isEmpty() ? "" : l.get(0)) + ")");
+                              org.json.JSONArray alts = new org.json.JSONArray();
+                    if (l != null) { for (int k = 1; k < l.size() && k < 5; k++) alts.put(l.get(k)); }
+                    js("window.onNative(" + JSONObject.quote(l == null || l.isEmpty() ? "" : l.get(0)) + "," + alts.toString() + ")");
                           }
                       });
                       Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
@@ -281,7 +283,7 @@ jobs:
                       i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN");
                       i.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, getPackageName());
                       i.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false);
-                      i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
+                      i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5);
                       hd.removeCallbacks(silenceTask);
                       hd.postDelayed(silenceTask, 5000);
                       try {
