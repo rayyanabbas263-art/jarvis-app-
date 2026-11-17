@@ -32,7 +32,7 @@ jobs:
           android {
               namespace 'com.rayyan.jarvis'
               compileSdk 34
-              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 15; versionName '2.4' }
+              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 16; versionName '2.5' }
               compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
           }
           tasks.withType(JavaCompile) { options.encoding = 'UTF-8' }
@@ -515,6 +515,7 @@ jobs:
                   boolean on = isAccessOn();
                   if (!on && mode.equals("call")) {
                       toast("Pehle Accessibility mein Jarvis ko on karo");
+                      JarvisAccess.voice = null;
                       go(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
                       return;
                   }
@@ -565,7 +566,7 @@ jobs:
 
                   @JavascriptInterface public void call(String name) {
                       String n = num(name);
-                      if (n != null) go(new Intent(Intent.ACTION_CALL, Uri.parse("tel:" + n)));
+                      if (n != null) { go(new Intent(Intent.ACTION_CALL, Uri.parse("tel:" + n))); JarvisAccess.sayVoice(1500); } else JarvisAccess.voice = null;
                   }
 
                   @JavascriptInterface public void whatsapp(String name, String text) {
@@ -652,6 +653,7 @@ jobs:
                       try {
                           byte[] pcm = android.util.Base64.decode(b64, android.util.Base64.DEFAULT);
                           JarvisAccess.voiceRate = rate;
+                          JarvisAccess.voiceComm = mode.equals("call");
                           JarvisAccess.voiceAt = System.currentTimeMillis();
                           JarvisAccess.voice = pcm;
                           if (mode.equals("now")) JarvisAccess.sayVoice(1300);
@@ -804,6 +806,7 @@ jobs:
               public static volatile byte[] voice = null;
               public static volatile int voiceRate = 24000;
               public static volatile long voiceAt = 0;
+              public static volatile boolean voiceComm = false;
               static PowerManager.WakeLock wl;
               static JarvisAccess inst;
 
@@ -837,7 +840,7 @@ jobs:
                               String m = pending;
                               int c = dlgClicks;
                               pending = "";
-                              if (m.equals("send") || m.equals("sendv")) voice = null;
+                              if (m.equals("send") || m.equals("sendv") || m.equals("call") || m.equals("calldlg")) voice = null;
                               if (inst != null && !(m.equals("calldlg") && c > 0)) {
                                   String what = m.equals("calldlg") ? "Voice call ka option" : ((m.equals("send") || m.equals("sendv")) ? "Send ka button" : "Call ka button");
                                   Toast.makeText(inst, "Jarvis: " + what + " nahi mila. Screen par dikha: " + dump, Toast.LENGTH_LONG).show();
@@ -853,20 +856,22 @@ jobs:
               public static void sayVoice(long delay) {
                   final byte[] v = voice;
                   final int r = voiceRate;
+                  final boolean cm = voiceComm;
                   voice = null;
+                  voiceComm = false;
                   if (v == null || System.currentTimeMillis() - voiceAt > 60000) return;
                   H.postDelayed(new Runnable() {
-                      public void run() { playPcm(v, r); }
+                      public void run() { playPcm(v, r, cm); }
                   }, delay);
               }
 
-              static void playPcm(final byte[] pcm, final int rate) {
+              static void playPcm(final byte[] pcm, final int rate, final boolean comm) {
                   new Thread(new Runnable() {
                       public void run() {
                           try {
                               int len = pcm.length & ~1;
                               AudioTrack t = new AudioTrack(
-                                  new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build(),
+                                  new AudioAttributes.Builder().setUsage(comm ? AudioAttributes.USAGE_VOICE_COMMUNICATION : AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build(),
                                   new AudioFormat.Builder().setSampleRate(rate).setEncoding(AudioFormat.ENCODING_PCM_16BIT).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build(),
                                   len, AudioTrack.MODE_STATIC, AudioManager.AUDIO_SESSION_ID_GENERATE);
                               t.write(pcm, 0, len);
@@ -940,6 +945,7 @@ jobs:
                           }
                           if (f != null && click(f)) {
                               dlgClicks++;
+                              if (dlgClicks == 1) sayVoice(1800);
                               if (dlgClicks >= 2) pending = "";
                           } else if (f == null) {
                               dump = collect(root);
