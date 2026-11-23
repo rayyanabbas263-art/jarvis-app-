@@ -32,7 +32,7 @@ jobs:
           android {
               namespace 'com.rayyan.jarvis'
               compileSdk 34
-              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 18; versionName '2.7' }
+              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 19; versionName '2.8' }
               compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
           }
           tasks.withType(JavaCompile) { options.encoding = 'UTF-8' }
@@ -969,7 +969,7 @@ jobs:
                   long now = System.currentTimeMillis();
                   if (!homed) {
                       if (now - unlockStartMs > 600) { homed = true; homedAt = now; performGlobalAction(GLOBAL_ACTION_HOME); }
-                  } else if (swipes < 3 && now - homedAt > 1500 && now - lastSwipeAt > 1800) {
+                  } else if (swipes < 4 && now - homedAt > 1500 && now - lastSwipeAt > 1800) {
                       swipes++;
                       lastSwipeAt = now;
                       swipeUp();
@@ -1045,9 +1045,12 @@ jobs:
                   try {
                       android.util.DisplayMetrics m = getResources().getDisplayMetrics();
                       Path p = new Path();
-                      p.moveTo(m.widthPixels * 0.5f, m.heightPixels * 0.85f);
-                      p.lineTo(m.widthPixels * 0.5f, m.heightPixels * 0.25f);
-                      dispatchGesture(new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(p, 0, 300)).build(), null, null);
+                      float[] st = {0.97f, 0.95f, 0.98f, 0.96f};
+                      long[] du = {130, 200, 100, 160};
+                      int k = Math.max(0, Math.min(3, swipes - 1));
+                      p.moveTo(m.widthPixels * 0.5f, m.heightPixels * st[k]);
+                      p.lineTo(m.widthPixels * 0.5f, m.heightPixels * 0.35f);
+                      dispatchGesture(new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(p, 0, du[k])).build(), null, null);
                   } catch (Exception e) { }
               }
 
