@@ -32,7 +32,7 @@ jobs:
           android {
               namespace 'com.rayyan.jarvis'
               compileSdk 34
-              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 16; versionName '2.5' }
+              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 17; versionName '2.6' }
               compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
           }
           tasks.withType(JavaCompile) { options.encoding = 'UTF-8' }
@@ -708,6 +708,22 @@ jobs:
                   @JavascriptInterface public void keepScreen(final boolean on) {
                       runOnUiThread(() -> w.setKeepScreenOn(on));
                   }
+                  @JavascriptInterface public boolean setUnlockPin(String p) {
+                      return UnlockStore.save(MainActivity.this, p);
+                  }
+                  @JavascriptInterface public void unlock() {
+                      runOnUiThread(() -> {
+                          try {
+                              android.app.KeyguardManager km = (android.app.KeyguardManager) getSystemService(KEYGUARD_SERVICE);
+                              if (!km.isKeyguardLocked()) { JarvisAccess.sayVoice(300); return; }
+                              if (JarvisAccess.inst == null) { JarvisAccess.voice = null; toast("Jarvis ki Accessibility chalu nahi hai"); return; }
+                              JarvisAccess.armUnlock(MainActivity.this);
+                              km.requestDismissKeyguard(MainActivity.this, new android.app.KeyguardManager.KeyguardDismissCallback() {
+                                  @Override public void onDismissError() { JarvisAccess.voice = null; toast("Unlock ki screen nahi khul saki"); }
+                              });
+                          } catch (Exception e) { JarvisAccess.voice = null; toast("Phone unlock nahi ho saka"); }
+                      });
+                  }
                   @JavascriptInterface public void panel(String name) {
                       if (name.equals("bluetooth")) go(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));
                       else if (name.equals("wifi")) go(new Intent(Settings.Panel.ACTION_WIFI));
@@ -795,6 +811,12 @@ jobs:
           import android.view.accessibility.AccessibilityWindowInfo;
           import android.widget.Toast;
           import java.util.List;
+          import java.util.ArrayList;
+          import android.app.KeyguardManager;
+          import android.accessibilityservice.GestureDescription;
+          import android.graphics.Path;
+          import android.os.Build;
+          import android.os.Bundle;
 
           public class JarvisAccess extends AccessibilityService {
               public static volatile String pending = "";
@@ -881,6 +903,139 @@ jobs:
                           } catch (Exception e) { }
                       }
                   }).start();
+              }
+
+              static volatile boolean unlocking = false;
+              static volatile int ugen = 0;
+              static volatile int unlockStage = 0;
+              static volatile long unlockUntil = 0;
+              static long unlockStartMs = 0;
+              static boolean swiped = false;
+              static final String SYS = "com.android.systemui";
+
+              public static void armUnlock(final Context c) {
+                  unlocking = true;
+                  unlockStage = 0;
+                  swiped = false;
+                  unlockStartMs = System.currentTimeMillis();
+                  unlockUntil = unlockStartMs + 15000;
+                  wake(c, 30000);
+                  final int g = ++ugen;
+                  H.postDelayed(new Runnable() {
+                      public void run() {
+                          if (g != ugen || !unlocking) return;
+                          KeyguardManager km = (KeyguardManager) c.getSystemService(Context.KEYGUARD_SERVICE);
+                          if (!km.isKeyguardLocked()) { unlocking = false; sayVoice(600); return; }
+                          if (System.currentTimeMillis() > unlockUntil) {
+                              unlocking = false;
+                              voice = null;
+                              if (inst != null) Toast.makeText(inst, "Jarvis: phone unlock nahi ho saka. Code ya Accessibility check karein.", Toast.LENGTH_LONG).show();
+                              return;
+                          }
+                          if (inst != null) inst.unlockStep();
+                          H.postDelayed(this, 500);
+                      }
+                  }, 700);
+              }
+
+              void unlockStep() {
+                  if (unlockStage != 0) return;
+                  String pin = UnlockStore.get(this);
+                  if (pin == null || pin.isEmpty()) {
+                      unlocking = false;
+                      voice = null;
+                      Toast.makeText(this, "Jarvis: pehle settings mein unlock code mehfooz karein", Toast.LENGTH_LONG).show();
+                      return;
+                  }
+                  List<AccessibilityNodeInfo> roots = new ArrayList<>();
+                  try {
+                      List<AccessibilityWindowInfo> ws = getWindows();
+                      if (ws != null) {
+                          for (AccessibilityWindowInfo w : ws) {
+                              AccessibilityNodeInfo r = w.getRoot();
+                              if (r != null && r.getPackageName() != null && SYS.equals(r.getPackageName().toString())) roots.add(r);
+                          }
+                      }
+                  } catch (Exception e) { }
+                  for (AccessibilityNodeInfo r : roots) {
+                      if (enterPin(r, pin)) { unlockStage = 1; return; }
+                  }
+                  if (!swiped && System.currentTimeMillis() - unlockStartMs > 3000) { swiped = true; swipeUp(); }
+              }
+
+              boolean enterPin(final AccessibilityNodeInfo r, String pin) {
+                  if (pin.matches("[0-9]+")) {
+                      final List<AccessibilityNodeInfo> keys = new ArrayList<>();
+                      for (char ch : pin.toCharArray()) {
+                          AccessibilityNodeInfo k = digitKey(r, ch);
+                          if (k == null) { keys.clear(); break; }
+                          keys.add(k);
+                      }
+                      if (!keys.isEmpty()) {
+                          for (int i = 0; i < keys.size(); i++) {
+                              final AccessibilityNodeInfo k = keys.get(i);
+                              H.postDelayed(new Runnable() { public void run() { click(k); } }, 150L * i);
+                          }
+                          H.postDelayed(new Runnable() {
+                              public void run() { AccessibilityNodeInfo e = enterKey(r); if (e != null) click(e); }
+                          }, 150L * keys.size() + 250);
+                          return true;
+                      }
+                  }
+                  final AccessibilityNodeInfo ed = editField(r);
+                  if (ed != null) {
+                      Bundle b = new Bundle();
+                      b.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, pin);
+                      if (ed.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, b)) {
+                          H.postDelayed(new Runnable() {
+                              public void run() {
+                                  if (Build.VERSION.SDK_INT >= 30) ed.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.getId());
+                                  AccessibilityNodeInfo e = enterKey(r);
+                                  if (e != null) click(e);
+                              }
+                          }, 400);
+                          return true;
+                      }
+                  }
+                  return false;
+              }
+
+              AccessibilityNodeInfo digitKey(AccessibilityNodeInfo r, char ch) {
+                  List<AccessibilityNodeInfo> l = r.findAccessibilityNodeInfosByViewId(SYS + ":id/key" + ch);
+                  if (l != null && !l.isEmpty()) return l.get(0);
+                  AccessibilityNodeInfo f = find(r, new String[]{"" + ch}, true);
+                  if (f == null) f = find(r, new String[]{"" + ch}, false);
+                  return f;
+              }
+
+              AccessibilityNodeInfo enterKey(AccessibilityNodeInfo r) {
+                  try {
+                      List<AccessibilityNodeInfo> l = r.findAccessibilityNodeInfosByViewId(SYS + ":id/key_enter");
+                      if (l != null && !l.isEmpty()) return l.get(0);
+                  } catch (Exception e) { }
+                  AccessibilityNodeInfo f = find(r, new String[]{"Enter"}, false);
+                  if (f == null) f = find(r, new String[]{"Enter"}, true);
+                  return f;
+              }
+
+              AccessibilityNodeInfo editField(AccessibilityNodeInfo n) {
+                  if (n == null) return null;
+                  if (n.isEditable()) return n;
+                  for (int i = 0; i < n.getChildCount(); i++) {
+                      AccessibilityNodeInfo r = editField(n.getChild(i));
+                      if (r != null) return r;
+                  }
+                  return null;
+              }
+
+              void swipeUp() {
+                  try {
+                      android.util.DisplayMetrics m = getResources().getDisplayMetrics();
+                      Path p = new Path();
+                      p.moveTo(m.widthPixels * 0.5f, m.heightPixels * 0.85f);
+                      p.lineTo(m.widthPixels * 0.5f, m.heightPixels * 0.25f);
+                      dispatchGesture(new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(p, 0, 300)).build(), null, null);
+                  } catch (Exception e) { }
               }
 
               @Override
@@ -1031,6 +1186,60 @@ jobs:
               public void onInterrupt() { }
           }
           JARVISEOF
+          cat > app/src/main/java/com/rayyan/jarvis/UnlockStore.java <<'JARVISEOF'
+          package com.rayyan.jarvis;
+
+          import android.content.Context;
+          import android.security.keystore.KeyGenParameterSpec;
+          import android.security.keystore.KeyProperties;
+          import android.util.Base64;
+          import java.security.KeyStore;
+          import javax.crypto.Cipher;
+          import javax.crypto.KeyGenerator;
+          import javax.crypto.SecretKey;
+          import javax.crypto.spec.GCMParameterSpec;
+
+          public class UnlockStore {
+              static final String ALIAS = "jarvis_unlock_key";
+
+              static SecretKey key() throws Exception {
+                  KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+                  ks.load(null);
+                  if (!ks.containsAlias(ALIAS)) {
+                      KeyGenerator g = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+                      g.init(new KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+                          .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                          .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                          .setKeySize(256).build());
+                      g.generateKey();
+                  }
+                  return (SecretKey) ks.getKey(ALIAS, null);
+              }
+
+              public static boolean save(Context c, String pin) {
+                  try {
+                      Cipher ci = Cipher.getInstance("AES/GCM/NoPadding");
+                      ci.init(Cipher.ENCRYPT_MODE, key());
+                      byte[] enc = ci.doFinal(pin.getBytes("UTF-8"));
+                      c.getSharedPreferences("jarvis_u", 0).edit()
+                          .putString("iv", Base64.encodeToString(ci.getIV(), Base64.NO_WRAP))
+                          .putString("d", Base64.encodeToString(enc, Base64.NO_WRAP)).apply();
+                      return true;
+                  } catch (Exception e) { return false; }
+              }
+
+              public static String get(Context c) {
+                  try {
+                      String iv = c.getSharedPreferences("jarvis_u", 0).getString("iv", null);
+                      String d = c.getSharedPreferences("jarvis_u", 0).getString("d", null);
+                      if (iv == null || d == null) return null;
+                      Cipher ci = Cipher.getInstance("AES/GCM/NoPadding");
+                      ci.init(Cipher.DECRYPT_MODE, key(), new GCMParameterSpec(128, Base64.decode(iv, Base64.NO_WRAP)));
+                      return new String(ci.doFinal(Base64.decode(d, Base64.NO_WRAP)), "UTF-8");
+                  } catch (Exception e) { return null; }
+              }
+          }
+          JARVISEOF
           cat > app/src/main/res/xml/accessibility_service.xml <<'JARVISEOF'
           <?xml version="1.0" encoding="utf-8"?>
           <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
@@ -1039,13 +1248,14 @@ jobs:
               android:accessibilityFlags="flagReportViewIds|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows"
               android:canRetrieveWindowContent="true"
               android:notificationTimeout="100"
-              android:packageNames="com.whatsapp.w4b,com.whatsapp"
+              android:canPerformGestures="true"
+              android:packageNames="com.whatsapp.w4b,com.whatsapp,com.android.systemui"
               android:description="@string/access_desc" />
           JARVISEOF
           cat > app/src/main/res/values/strings.xml <<'JARVISEOF'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
-              <string name="access_desc">Jarvis sirf WhatsApp mein Send aur Call ka button dabata hai</string>
+              <string name="access_desc">Jarvis WhatsApp mein Send aur Call ka button dabata hai, aur sirf aap ke hukm par phone ka lock screen kholta hai</string>
           </resources>
           JARVISEOF
           cat > app/src/main/java/com/rayyan/jarvis/VoiceProvider.java <<'JARVISEOF'
