@@ -32,7 +32,7 @@ jobs:
           android {
               namespace 'com.rayyan.jarvis'
               compileSdk 34
-              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 19; versionName '2.8' }
+              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 20; versionName '2.9' }
               compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
           }
           tasks.withType(JavaCompile) { options.encoding = 'UTF-8' }
@@ -738,6 +738,9 @@ jobs:
           import android.service.voice.VoiceInteractionService;
 
           public class JarvisService extends VoiceInteractionService {
+              static JarvisService inst;
+              @Override public void onReady() { super.onReady(); inst = this; }
+              @Override public void onShutdown() { super.onShutdown(); if (inst == this) inst = null; }
           }
           JARVISEOF
           cat > app/src/main/java/com/rayyan/jarvis/JarvisSessionService.java <<'JARVISEOF'
@@ -812,6 +815,9 @@ jobs:
           import android.widget.Toast;
           import java.util.List;
           import java.util.ArrayList;
+          import android.view.KeyEvent;
+          import android.content.Intent;
+          import android.service.voice.VoiceInteractionSession;
           import android.app.KeyguardManager;
           import android.accessibilityservice.GestureDescription;
           import android.graphics.Path;
@@ -1054,6 +1060,50 @@ jobs:
                   } catch (Exception e) { }
               }
 
+              static boolean volUp = false, volDown = false, volFired = false, volTimerOn = false;
+              static int vgen = 0;
+
+              @Override
+              protected boolean onKeyEvent(KeyEvent ev) {
+                  int k = ev.getKeyCode();
+                  if (k != KeyEvent.KEYCODE_VOLUME_UP && k != KeyEvent.KEYCODE_VOLUME_DOWN) return false;
+                  if (ev.getAction() == KeyEvent.ACTION_DOWN) {
+                      if (k == KeyEvent.KEYCODE_VOLUME_UP) volUp = true; else volDown = true;
+                      if (volUp && volDown && !volTimerOn) {
+                          volTimerOn = true;
+                          final int g = ++vgen;
+                          H.postDelayed(new Runnable() {
+                              public void run() {
+                                  if (g == vgen && volUp && volDown && !volFired) { volFired = true; triggerJarvis(); }
+                              }
+                          }, 1000);
+                      }
+                  } else if (ev.getAction() == KeyEvent.ACTION_UP) {
+                      if (k == KeyEvent.KEYCODE_VOLUME_UP) volUp = false; else volDown = false;
+                      vgen++;
+                      volTimerOn = false;
+                      if (!volUp && !volDown) volFired = false;
+                  }
+                  return volFired;
+              }
+
+              void triggerJarvis() {
+                  try { wake(this, 20000); } catch (Exception e) { }
+                  try {
+                      if (JarvisService.inst != null) {
+                          JarvisService.inst.showSession(new Bundle(), VoiceInteractionSession.SHOW_WITH_ASSIST);
+                          return;
+                      }
+                  } catch (Exception e) { }
+                  try {
+                      Intent i = new Intent(this, MainActivity.class);
+                      i.setAction(Intent.ACTION_ASSIST);
+                      i.putExtra("assist", true);
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                      startActivity(i);
+                  } catch (Exception e) { }
+              }
+
               @Override
               protected void onServiceConnected() { inst = this; }
 
@@ -1261,7 +1311,8 @@ jobs:
           <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
               android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
               android:accessibilityFeedbackType="feedbackGeneric"
-              android:accessibilityFlags="flagReportViewIds|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows"
+              android:accessibilityFlags="flagReportViewIds|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows|flagRequestFilterKeyEvents"
+              android:canRequestFilterKeyEvents="true"
               android:canRetrieveWindowContent="true"
               android:notificationTimeout="100"
               android:canPerformGestures="true"
