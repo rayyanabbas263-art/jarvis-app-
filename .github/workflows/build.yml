@@ -32,7 +32,7 @@ jobs:
           android {
               namespace 'com.rayyan.jarvis'
               compileSdk 34
-              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 20; versionName '2.9' }
+              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 22; versionName '3.1' }
               compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
           }
           tasks.withType(JavaCompile) { options.encoding = 'UTF-8' }
@@ -937,7 +937,14 @@ jobs:
                       public void run() {
                           if (g != ugen || !unlocking) return;
                           KeyguardManager km = (KeyguardManager) c.getSystemService(Context.KEYGUARD_SERVICE);
-                          if (!km.isKeyguardLocked()) { unlocking = false; sayVoice(600); return; }
+                          if (!km.isKeyguardLocked()) {
+                              unlocking = false;
+                              long dur = 2500;
+                              if (voice != null && voiceRate >= 8000) dur = Math.min(7000L, (voice.length / 2L) * 1000L / voiceRate);
+                              sayVoice(100);
+                              armFind(dur + 500);
+                              return;
+                          }
                           if (System.currentTimeMillis() > unlockUntil) {
                               unlocking = false;
                               voice = null;
@@ -1101,6 +1108,78 @@ jobs:
                       i.putExtra("assist", true);
                       i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
                       startActivity(i);
+                  } catch (Exception e) { }
+              }
+
+              static volatile boolean finding = false;
+              static volatile int fgen = 0;
+              static int fstep = 0;
+              static long fStart = 0;
+              static long fClickAfter = 0;
+
+              public static void armFind(long speakMs) {
+                  if (inst == null) return;
+                  finding = true;
+                  fstep = 0;
+                  fStart = System.currentTimeMillis();
+                  fClickAfter = fStart + speakMs;
+                  final int g = ++fgen;
+                  try { inst.performGlobalAction(GLOBAL_ACTION_HOME); } catch (Exception e) { }
+                  H.postDelayed(new Runnable() {
+                      public void run() {
+                          if (g != fgen || !finding) return;
+                          if (System.currentTimeMillis() - fStart > 18000) { finding = false; return; }
+                          if (inst != null && inst.findStep()) {
+                              finding = false;
+                              return;
+                          }
+                          H.postDelayed(this, 900);
+                      }
+                  }, 1300);
+              }
+
+              boolean findStep() {
+                  AccessibilityNodeInfo hit = null;
+                  try {
+                      List<AccessibilityWindowInfo> ws = getWindows();
+                      if (ws != null) {
+                          for (AccessibilityWindowInfo w : ws) {
+                              AccessibilityNodeInfo r = w.getRoot();
+                              if (r == null || r.getPackageName() == null) continue;
+                              if (!r.getPackageName().toString().toLowerCase().contains("launcher")) continue;
+                              hit = findJarvisIcon(r);
+                              if (hit != null) break;
+                          }
+                      }
+                  } catch (Exception e) { }
+                  if (hit != null) {
+                      if (System.currentTimeMillis() < fClickAfter) return false;
+                      click(hit);
+                      return true;
+                  }
+                  int n = fstep++;
+                  if (n < 4) swipeH(true); else if (n < 10) swipeH(false);
+                  return false;
+              }
+
+              AccessibilityNodeInfo findJarvisIcon(AccessibilityNodeInfo n) {
+                  if (n == null) return null;
+                  CharSequence t = n.getText(), d = n.getContentDescription();
+                  if ((t != null && t.toString().trim().equalsIgnoreCase("Jarvis")) || (d != null && d.toString().trim().equalsIgnoreCase("Jarvis"))) return n;
+                  for (int i = 0; i < n.getChildCount(); i++) {
+                      AccessibilityNodeInfo r = findJarvisIcon(n.getChild(i));
+                      if (r != null) return r;
+                  }
+                  return null;
+              }
+
+              void swipeH(boolean next) {
+                  try {
+                      android.util.DisplayMetrics m = getResources().getDisplayMetrics();
+                      Path p = new Path();
+                      p.moveTo(m.widthPixels * (next ? 0.85f : 0.15f), m.heightPixels * 0.45f);
+                      p.lineTo(m.widthPixels * (next ? 0.15f : 0.85f), m.heightPixels * 0.45f);
+                      dispatchGesture(new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(p, 0, 250)).build(), null, null);
                   } catch (Exception e) { }
               }
 
@@ -1316,7 +1395,7 @@ jobs:
               android:canRetrieveWindowContent="true"
               android:notificationTimeout="100"
               android:canPerformGestures="true"
-              android:packageNames="com.whatsapp.w4b,com.whatsapp,com.android.systemui"
+              android:packageNames="com.whatsapp.w4b,com.whatsapp,com.android.systemui,com.google.android.apps.nexuslauncher,com.android.launcher3"
               android:description="@string/access_desc" />
           JARVISEOF
           cat > app/src/main/res/values/strings.xml <<'JARVISEOF'
