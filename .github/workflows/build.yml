@@ -32,7 +32,7 @@ jobs:
           android {
               namespace 'com.rayyan.jarvis'
               compileSdk 34
-              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 24; versionName '3.3' }
+              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 26; versionName '3.5' }
               compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
           }
           tasks.withType(JavaCompile) { options.encoding = 'UTF-8' }
@@ -48,6 +48,9 @@ jobs:
               <uses-permission android:name="com.android.alarm.permission.SET_ALARM"/>
               <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>
               <uses-permission android:name="android.permission.WAKE_LOCK"/>
+              <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
+              <uses-permission android:name="android.permission.READ_CALL_LOG"/>
+              <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS"/>
               <queries>
                   <intent><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent>
                   <package android:name="com.whatsapp.w4b"/>
@@ -59,6 +62,9 @@ jobs:
                       <intent-filter><action android:name="android.intent.action.ASSIST"/><category android:name="android.intent.category.DEFAULT"/></intent-filter>
                       <intent-filter><action android:name="android.intent.action.VOICE_COMMAND"/><category android:name="android.intent.category.DEFAULT"/></intent-filter>
                   </activity>
+                  <receiver android:name=".CallReceiver" android:exported="true">
+                      <intent-filter><action android:name="android.intent.action.PHONE_STATE"/></intent-filter>
+                  </receiver>
                   <service android:name=".JarvisService" android:permission="android.permission.BIND_VOICE_INTERACTION" android:exported="true">
                       <meta-data android:name="android.voice_interaction" android:resource="@xml/interaction_service"/>
                       <intent-filter><action android:name="android.service.voice.VoiceInteractionService"/></intent-filter>
@@ -724,6 +730,21 @@ jobs:
                           } catch (Exception e) { JarvisAccess.voice = null; toast("Phone unlock nahi ho saka"); }
                       });
                   }
+                  @JavascriptInterface public void setSecretary(boolean on, String names, String me, String b64, int rate) {
+                      getSharedPreferences("jarvis_sec", 0).edit()
+                          .putBoolean("on", on)
+                          .putString("names", names == null ? "" : names)
+                          .putString("me", me == null ? "" : me)
+                          .putString("audio", b64 == null ? "" : b64)
+                          .putInt("rate", rate).apply();
+                      if (on) {
+                          runOnUiThread(() -> {
+                              try {
+                                  requestPermissions(new String[]{Manifest.permission.READ_PHONE_STATE, Manifest.permission.READ_CALL_LOG, Manifest.permission.ANSWER_PHONE_CALLS, Manifest.permission.READ_CONTACTS}, 3);
+                              } catch (Exception e) { }
+                          });
+                      }
+                  }
                   @JavascriptInterface public void panel(String name) {
                       if (name.equals("bluetooth")) go(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));
                       else if (name.equals("wifi")) go(new Intent(Settings.Panel.ACTION_WIFI));
@@ -815,6 +836,9 @@ jobs:
           import android.widget.Toast;
           import java.util.List;
           import java.util.ArrayList;
+          import android.telecom.TelecomManager;
+          import android.util.Base64;
+          import android.content.SharedPreferences;
           import android.view.KeyEvent;
           import android.content.Intent;
           import android.service.voice.VoiceInteractionSession;
@@ -1068,22 +1092,40 @@ jobs:
               }
 
               static boolean volUp = false, volDown = false, volFired = false, volTimerOn = false;
+              static boolean[] passedDown = new boolean[2];
+              static boolean[] consumedDown = new boolean[2];
               static int vgen = 0;
 
               @Override
               protected boolean onKeyEvent(KeyEvent ev) {
                   int k = ev.getKeyCode();
                   if (k != KeyEvent.KEYCODE_VOLUME_UP && k != KeyEvent.KEYCODE_VOLUME_DOWN) return false;
+                  int i = (k == KeyEvent.KEYCODE_VOLUME_UP) ? 0 : 1;
                   if (ev.getAction() == KeyEvent.ACTION_DOWN) {
-                      if (k == KeyEvent.KEYCODE_VOLUME_UP) volUp = true; else volDown = true;
-                      if (volUp && volDown && !volFired) { volFired = true; triggerJarvis(); }
+                      if (i == 0) volUp = true; else volDown = true;
+                      if (volFired) {
+                          // system ko jo DOWN pehle mil chuka, uski dohrayi hui DOWN rok do; naya DOWN bhi rok do
+                          if (!passedDown[i]) consumedDown[i] = true;
+                          return true;
+                      }
+                      if (volUp && volDown) {
+                          volFired = true;
+                          if (!passedDown[i]) consumedDown[i] = true;
+                          triggerJarvis();
+                          return true;
+                      }
+                      passedDown[i] = true;
+                      return false;
                   } else if (ev.getAction() == KeyEvent.ACTION_UP) {
-                      boolean was = volFired;
-                      if (k == KeyEvent.KEYCODE_VOLUME_UP) volUp = false; else volDown = false;
+                      if (i == 0) volUp = false; else volDown = false;
+                      boolean eat = consumedDown[i];
+                      consumedDown[i] = false;
+                      passedDown[i] = false;
                       if (!volUp && !volDown) volFired = false;
-                      return was;
+                      // jis button ka DOWN system tak pahunch chuka, uska UP bhi zaroor pahunchna chahiye, warna volume atak kar chalta rehta hai
+                      return eat;
                   }
-                  return volFired;
+                  return false;
               }
 
               void triggerJarvis() {
@@ -1173,6 +1215,115 @@ jobs:
                       p.lineTo(m.widthPixels * (next ? 0.15f : 0.85f), m.heightPixels * 0.45f);
                       dispatchGesture(new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(p, 0, 250)).build(), null, null);
                   } catch (Exception e) { }
+              }
+
+              static volatile boolean answering = false;
+              static volatile boolean secCall = false;
+              static volatile int agen = 0;
+              static volatile int sgen = 0;
+              static long aStart = 0;
+              static boolean telecomTried = false;
+              static int oldVol = -1;
+
+              public static void armAnswer(final Context c) {
+                  answering = true;
+                  telecomTried = false;
+                  aStart = System.currentTimeMillis();
+                  wake(c, 40000);
+                  final int g = ++agen;
+                  H.postDelayed(new Runnable() {
+                      public void run() {
+                          if (g != agen || !answering) return;
+                          long now = System.currentTimeMillis();
+                          if (now - aStart > 25000) { answering = false; return; }
+                          boolean ok = false;
+                          if (inst != null) ok = inst.clickCallBtn(new String[]{"answer", "accept"});
+                          if (!ok && !telecomTried && now - aStart > 1500) {
+                              telecomTried = true;
+                              try { ((TelecomManager) c.getSystemService(Context.TELECOM_SERVICE)).acceptRingingCall(); } catch (Exception e) { }
+                          }
+                          H.postDelayed(this, 400);
+                      }
+                  }, 300);
+              }
+
+              public static void onCallAnswered(final Context c) {
+                  answering = false;
+                  ++agen;
+                  secCall = true;
+                  final int g2 = ++sgen;
+                  H.postDelayed(new Runnable() {
+                      public void run() {
+                          if (g2 != sgen || !secCall) return;
+                          SharedPreferences sp = c.getSharedPreferences("jarvis_sec", 0);
+                          String b = sp.getString("audio", "");
+                          int rate = sp.getInt("rate", 24000);
+                          try {
+                              AudioManager am = (AudioManager) c.getSystemService(Context.AUDIO_SERVICE);
+                              am.setSpeakerphoneOn(true);
+                              if (oldVol < 0) oldVol = am.getStreamVolume(AudioManager.STREAM_MUSIC);
+                              am.setStreamVolume(AudioManager.STREAM_MUSIC, (int) (am.getStreamMaxVolume(AudioManager.STREAM_MUSIC) * 0.6), 0);
+                          } catch (Exception e) { }
+                          long dur = 3000;
+                          if (!b.isEmpty()) {
+                              byte[] pcm = Base64.decode(b, Base64.DEFAULT);
+                              dur = (pcm.length / 2L) * 1000L / Math.max(8000, rate);
+                              playPcm(pcm, rate, false);
+                          }
+                          H.postDelayed(new Runnable() {
+                              public void run() {
+                                  if (g2 != sgen || !secCall) return;
+                                  boolean ok = false;
+                                  if (inst != null) ok = inst.clickCallBtn(new String[]{"end call", "hang up", "end"});
+                                  if (!ok) {
+                                      try { ((TelecomManager) c.getSystemService(Context.TELECOM_SERVICE)).endCall(); } catch (Exception e) { }
+                                  }
+                              }
+                          }, dur + 900);
+                      }
+                  }, 2000);
+              }
+
+              public static void endSecretary(Context c) {
+                  answering = false;
+                  secCall = false;
+                  ++agen;
+                  ++sgen;
+                  try {
+                      AudioManager am = (AudioManager) c.getSystemService(Context.AUDIO_SERVICE);
+                      am.setSpeakerphoneOn(false);
+                      if (oldVol >= 0) am.setStreamVolume(AudioManager.STREAM_MUSIC, oldVol, 0);
+                  } catch (Exception e) { }
+                  oldVol = -1;
+              }
+
+              boolean clickCallBtn(String[] words) {
+                  try {
+                      List<AccessibilityWindowInfo> ws = getWindows();
+                      if (ws == null) return false;
+                      for (AccessibilityWindowInfo w : ws) {
+                          AccessibilityNodeInfo r = w.getRoot();
+                          if (r == null || r.getPackageName() == null) continue;
+                          String p = r.getPackageName().toString().toLowerCase();
+                          if (!(p.contains("dialer") || p.contains("incallui") || p.contains("telecom"))) continue;
+                          AccessibilityNodeInfo n = findExactLabel(r, words);
+                          if (n != null && click(n)) return true;
+                      }
+                  } catch (Exception e) { }
+                  return false;
+              }
+
+              AccessibilityNodeInfo findExactLabel(AccessibilityNodeInfo n, String[] words) {
+                  if (n == null) return null;
+                  CharSequence t = n.getText(), d = n.getContentDescription();
+                  String a = t == null ? "" : t.toString().trim().toLowerCase();
+                  String b = d == null ? "" : d.toString().trim().toLowerCase();
+                  for (String w : words) if (a.equals(w) || b.equals(w)) return n;
+                  for (int i = 0; i < n.getChildCount(); i++) {
+                      AccessibilityNodeInfo r = findExactLabel(n.getChild(i), words);
+                      if (r != null) return r;
+                  }
+                  return null;
               }
 
               @Override
@@ -1321,6 +1472,77 @@ jobs:
 
               @Override
               public void onInterrupt() { }
+          }
+          JARVISEOF
+          cat > app/src/main/java/com/rayyan/jarvis/CallReceiver.java <<'JARVISEOF'
+          package com.rayyan.jarvis;
+
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.database.Cursor;
+          import android.net.Uri;
+          import android.provider.ContactsContract;
+          import android.telephony.TelephonyManager;
+
+          public class CallReceiver extends BroadcastReceiver {
+              static boolean mine = false;
+              static boolean answered = false;
+              static String handled = "";
+
+              static String norm(String s) {
+                  if (s == null) return "";
+                  return s.toLowerCase().replaceAll("[^a-z0-9\\u0900-\\u097f\\u0600-\\u06ff]", "").replaceAll("(.)\\1+", "$1");
+              }
+
+              static boolean allowed(Context c, String num, String names) {
+                  String cn = "";
+                  try {
+                      Uri u = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(num));
+                      Cursor cur = c.getContentResolver().query(u, new String[]{ContactsContract.PhoneLookup.DISPLAY_NAME}, null, null, null);
+                      if (cur != null) {
+                          if (cur.moveToFirst()) cn = norm(cur.getString(0));
+                          cur.close();
+                      }
+                  } catch (Exception e) { }
+                  if (cn.isEmpty()) return false;
+                  for (String x : names.split("[,\\n\\u060c]")) {
+                      String n = norm(x);
+                      if (n.isEmpty()) continue;
+                      if (cn.equals(n) || (n.length() >= 4 && cn.startsWith(n))) return true;
+                  }
+                  return false;
+              }
+
+              @Override
+              public void onReceive(Context c, Intent i) {
+                  if (!TelephonyManager.ACTION_PHONE_STATE_CHANGED.equals(i.getAction())) return;
+                  String st = i.getStringExtra(TelephonyManager.EXTRA_STATE);
+                  String num = i.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER);
+                  SharedPreferences sp = c.getSharedPreferences("jarvis_sec", 0);
+                  if (TelephonyManager.EXTRA_STATE_IDLE.equals(st)) {
+                      boolean was = mine;
+                      mine = false; answered = false; handled = "";
+                      if (was || JarvisAccess.secCall) JarvisAccess.endSecretary(c);
+                      return;
+                  }
+                  if (!sp.getBoolean("on", false)) return;
+                  if (TelephonyManager.EXTRA_STATE_RINGING.equals(st)) {
+                      if (num != null && !mine && !num.equals(handled)) {
+                          handled = num;
+                          if (allowed(c, num, sp.getString("names", ""))) {
+                              mine = true;
+                              JarvisAccess.armAnswer(c);
+                          }
+                      }
+                  } else if (TelephonyManager.EXTRA_STATE_OFFHOOK.equals(st)) {
+                      if (mine && !answered) {
+                          answered = true;
+                          JarvisAccess.onCallAnswered(c);
+                      }
+                  }
+              }
           }
           JARVISEOF
           cat > app/src/main/java/com/rayyan/jarvis/UnlockStore.java <<'JARVISEOF'
@@ -2222,7 +2444,7 @@ jobs:
               android:canRetrieveWindowContent="true"
               android:notificationTimeout="100"
               android:canPerformGestures="true"
-              android:packageNames="com.whatsapp.w4b,com.whatsapp,com.android.systemui,com.google.android.apps.nexuslauncher,com.android.launcher3"
+              android:packageNames="com.whatsapp.w4b,com.whatsapp,com.android.systemui,com.google.android.apps.nexuslauncher,com.android.launcher3,com.google.android.dialer,com.android.incallui,com.android.dialer"
               android:description="@string/access_desc" />
           JARVISEOF
           cat > app/src/main/res/values/strings.xml <<'JARVISEOF'
