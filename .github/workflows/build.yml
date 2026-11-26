@@ -32,7 +32,7 @@ jobs:
           android {
               namespace 'com.rayyan.jarvis'
               compileSdk 34
-              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 26; versionName '3.5' }
+              defaultConfig { applicationId 'com.rayyan.jarvis'; minSdk 26; targetSdk 34; versionCode 28; versionName '3.7' }
               compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
           }
           tasks.withType(JavaCompile) { options.encoding = 'UTF-8' }
@@ -745,6 +745,30 @@ jobs:
                           });
                       }
                   }
+                  @JavascriptInterface public void saveAccess(String names, String me, String b64, int rate) {
+                      getSharedPreferences("jarvis_sec", 0).edit()
+                          .putString("names", names == null ? "" : names)
+                          .putString("me", me == null ? "" : me)
+                          .putString("audio", b64 == null ? "" : b64)
+                          .putInt("rate", rate).apply();
+                  }
+                  @JavascriptInterface public boolean accessSaved() {
+                      android.content.SharedPreferences p = getSharedPreferences("jarvis_sec", 0);
+                      return !p.getString("names", "").isEmpty() && !p.getString("audio", "").isEmpty();
+                  }
+                  @JavascriptInterface public boolean accessOn() {
+                      return getSharedPreferences("jarvis_sec", 0).getBoolean("on", false);
+                  }
+                  @JavascriptInterface public void setAccessMode(boolean on) {
+                      getSharedPreferences("jarvis_sec", 0).edit().putBoolean("on", on).apply();
+                      if (on) {
+                          runOnUiThread(() -> {
+                              try {
+                                  requestPermissions(new String[]{Manifest.permission.READ_PHONE_STATE, Manifest.permission.READ_CALL_LOG, Manifest.permission.ANSWER_PHONE_CALLS, Manifest.permission.READ_CONTACTS}, 3);
+                              } catch (Exception e) { }
+                          });
+                      }
+                  }
                   @JavascriptInterface public void panel(String name) {
                       if (name.equals("bluetooth")) go(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));
                       else if (name.equals("wifi")) go(new Intent(Settings.Panel.ACTION_WIFI));
@@ -1326,6 +1350,173 @@ jobs:
                   return null;
               }
 
+              static volatile int waState = 0;
+              static volatile int wgen = 0;
+              static long waStart = 0;
+              static long lastWaScan = 0;
+
+              void waEvent(AccessibilityEvent e) {
+                  if (waState != 0) return;
+                  CharSequence pk = e.getPackageName();
+                  if (pk == null) return;
+                  String p = pk.toString();
+                  if (!(p.startsWith("com.whatsapp") || p.equals(SYS))) return;
+                  SharedPreferences sp = getSharedPreferences("jarvis_sec", 0);
+                  if (!sp.getBoolean("on", false)) return;
+                  long now = System.currentTimeMillis();
+                  if (now - lastWaScan < 600) return;
+                  lastWaScan = now;
+                  if (!waIncoming(sp.getString("names", ""))) return;
+                  waState = 1;
+                  waStart = now;
+                  wake(this, 40000);
+                  final int g = ++wgen;
+                  H.postDelayed(new Runnable() {
+                      public void run() {
+                          if (g != wgen || waState != 1) return;
+                          if (System.currentTimeMillis() - waStart > 25000) { waState = 0; return; }
+                          if (inst != null) {
+                              if (inst.waConnected()) { waState = 2; inst.waConnectedFlow(g); return; }
+                              inst.waAcceptStep();
+                          }
+                          H.postDelayed(this, 700);
+                      }
+                  }, 300);
+              }
+
+              boolean isWaWin(AccessibilityNodeInfo r) {
+                  if (r == null || r.getPackageName() == null) return false;
+                  String p = r.getPackageName().toString();
+                  return p.startsWith("com.whatsapp") || p.equals(SYS);
+              }
+
+              void collectTexts(AccessibilityNodeInfo n, List<String> out) {
+                  if (n == null) return;
+                  CharSequence t = n.getText(), d = n.getContentDescription();
+                  if (t != null && t.length() > 0) out.add(t.toString().trim().toLowerCase());
+                  if (d != null && d.length() > 0) out.add(d.toString().trim().toLowerCase());
+                  for (int i = 0; i < n.getChildCount(); i++) collectTexts(n.getChild(i), out);
+              }
+
+              boolean waIncoming(String names) {
+                  try {
+                      List<AccessibilityWindowInfo> ws = getWindows();
+                      if (ws == null) return false;
+                      for (AccessibilityWindowInfo w : ws) {
+                          AccessibilityNodeInfo r = w.getRoot();
+                          if (!isWaWin(r)) continue;
+                          List<String> tx = new ArrayList<>();
+                          collectTexts(r, tx);
+                          boolean full = tx.contains("swipe up to accept");
+                          boolean head = tx.contains("incoming voice call") && tx.contains("answer");
+                          if (!full && !head) continue;
+                          for (String t : tx) {
+                              String nt = CallReceiver.norm(t);
+                              if (nt.isEmpty()) continue;
+                              for (String x : names.split("[,\\n\\u060c]")) {
+                                  String n = CallReceiver.norm(x);
+                                  if (n.isEmpty()) continue;
+                                  if (nt.equals(n) || (n.length() >= 4 && nt.startsWith(n) && nt.length() <= n.length() + 8)) return true;
+                              }
+                          }
+                      }
+                  } catch (Exception e) { }
+                  return false;
+              }
+
+              void waAcceptStep() {
+                  try {
+                      List<AccessibilityWindowInfo> ws = getWindows();
+                      if (ws == null) return;
+                      boolean full = false;
+                      for (AccessibilityWindowInfo w : ws) {
+                          AccessibilityNodeInfo r = w.getRoot();
+                          if (!isWaWin(r)) continue;
+                          AccessibilityNodeInfo a = findExactLabel(r, new String[]{"answer"});
+                          if (a != null && click(a)) return;
+                          List<String> tx = new ArrayList<>();
+                          collectTexts(r, tx);
+                          if (tx.contains("swipe up to accept")) full = true;
+                      }
+                      if (full) {
+                          android.util.DisplayMetrics m = getResources().getDisplayMetrics();
+                          Path p = new Path();
+                          p.moveTo(m.widthPixels * 0.5f, m.heightPixels * 0.89f);
+                          p.lineTo(m.widthPixels * 0.5f, m.heightPixels * 0.50f);
+                          dispatchGesture(new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(p, 0, 350)).build(), null, null);
+                      }
+                  } catch (Exception e) { }
+              }
+
+              boolean waConnected() {
+                  try {
+                      List<AccessibilityWindowInfo> ws = getWindows();
+                      if (ws == null) return false;
+                      for (AccessibilityWindowInfo w : ws) {
+                          AccessibilityNodeInfo r = w.getRoot();
+                          if (r == null || r.getPackageName() == null || !r.getPackageName().toString().startsWith("com.whatsapp")) continue;
+                          if (findExactLabel(r, new String[]{"end"}) != null && findExactLabel(r, new String[]{"speaker"}) != null) return true;
+                      }
+                  } catch (Exception e) { }
+                  return false;
+              }
+
+              boolean waClick(String[] words) {
+                  try {
+                      List<AccessibilityWindowInfo> ws = getWindows();
+                      if (ws == null) return false;
+                      for (AccessibilityWindowInfo w : ws) {
+                          AccessibilityNodeInfo r = w.getRoot();
+                          if (r == null || r.getPackageName() == null || !r.getPackageName().toString().startsWith("com.whatsapp")) continue;
+                          AccessibilityNodeInfo n = findExactLabel(r, words);
+                          if (n != null && click(n)) return true;
+                      }
+                  } catch (Exception e) { }
+                  return false;
+              }
+
+              void waConnectedFlow(final int g) {
+                  final Context c = this;
+                  H.postDelayed(new Runnable() {
+                      public void run() {
+                          if (g != wgen || waState != 2) return;
+                          SharedPreferences sp = c.getSharedPreferences("jarvis_sec", 0);
+                          String b = sp.getString("audio", "");
+                          int rate = sp.getInt("rate", 24000);
+                          try {
+                              AudioManager am = (AudioManager) c.getSystemService(Context.AUDIO_SERVICE);
+                              if (oldVol < 0) oldVol = am.getStreamVolume(AudioManager.STREAM_MUSIC);
+                              am.setStreamVolume(AudioManager.STREAM_MUSIC, (int) (am.getStreamMaxVolume(AudioManager.STREAM_MUSIC) * 0.6), 0);
+                              if (!waClick(new String[]{"speaker"})) am.setSpeakerphoneOn(true);
+                          } catch (Exception e) { }
+                          H.postDelayed(new Runnable() {
+                              public void run() {
+                                  if (g != wgen || waState != 2) return;
+                                  long dur = 3000;
+                                  if (!b.isEmpty()) {
+                                      byte[] pcm = Base64.decode(b, Base64.DEFAULT);
+                                      dur = (pcm.length / 2L) * 1000L / Math.max(8000, rate);
+                                      playPcm(pcm, rate, false);
+                                  }
+                                  H.postDelayed(new Runnable() {
+                                      public void run() {
+                                          if (g != wgen || waState != 2) return;
+                                          waClick(new String[]{"end"});
+                                          H.postDelayed(new Runnable() {
+                                              public void run() {
+                                                  if (g != wgen) return;
+                                                  waState = 0;
+                                                  endSecretary(c);
+                                              }
+                                          }, 6000);
+                                      }
+                                  }, dur + 900);
+                              }
+                          }, 600);
+                      }
+                  }, 2000);
+              }
+
               @Override
               protected void onServiceConnected() { inst = this; }
 
@@ -1335,6 +1526,7 @@ jobs:
               @Override
               public void onAccessibilityEvent(AccessibilityEvent e) {
                   if (!pending.isEmpty()) step();
+                  waEvent(e);
               }
 
               void step() {
@@ -1519,7 +1711,6 @@ jobs:
               public void onReceive(Context c, Intent i) {
                   if (!TelephonyManager.ACTION_PHONE_STATE_CHANGED.equals(i.getAction())) return;
                   String st = i.getStringExtra(TelephonyManager.EXTRA_STATE);
-                  String num = i.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER);
                   SharedPreferences sp = c.getSharedPreferences("jarvis_sec", 0);
                   if (TelephonyManager.EXTRA_STATE_IDLE.equals(st)) {
                       boolean was = mine;
@@ -1528,6 +1719,7 @@ jobs:
                       return;
                   }
                   if (!sp.getBoolean("on", false)) return;
+                  String num = i.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER);
                   if (TelephonyManager.EXTRA_STATE_RINGING.equals(st)) {
                       if (num != null && !mine && !num.equals(handled)) {
                           handled = num;
